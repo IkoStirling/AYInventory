@@ -64,7 +64,8 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
                      {"catalogVersion", snapshot.catalogVersion},
                      {"nextAbilityBindingId", snapshot.nextAbilityBindingId},
                      {"containers", Json::array()}, {"actors", Json::array()},
-                     {"items", Json::array()}, {"transfers", Json::array()}};
+                     {"items", Json::array()}, {"transfers", Json::array()},
+                     {"crafts", Json::array()}};
         for (const auto& value : snapshot.containers)
             root["containers"].push_back({{"id", value.id}, {"slots", value.slots}});
         for (const auto& value : snapshot.actors)
@@ -81,6 +82,12 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
         for (const auto& [request, fingerprint] : snapshot.completedTransfers)
             root["transfers"].push_back({{"request", request},
                                          {"fingerprint", fingerprint}});
+        for (const auto& [request, receipt] : snapshot.completedCrafts)
+            root["crafts"].push_back({{"request", request},
+                {"output", receipt.outputItemId},
+                {"place", static_cast<unsigned>(receipt.destination.place)},
+                {"owner", receipt.destination.ownerId},
+                {"slot", receipt.destination.slot}});
         return root.dump();
     } catch (const std::exception& ex) {
         return invalid<std::string>(ex.what());
@@ -103,6 +110,10 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
         for (const char* key : {"containers", "actors", "items", "transfers"})
             if (!root.contains(key) || !root.at(key).is_array())
                 return invalid<Snapshot>(std::string("invalid ") + key + " array");
+        if ((snapshot.schemaVersion == 3
+             && (!root.contains("crafts") || !root.at("crafts").is_array()))
+            || (root.contains("crafts") && !root.at("crafts").is_array()))
+            return invalid<Snapshot>("invalid crafts array");
         for (const auto& value : root["containers"]) {
             Container entry;
             if (!text(value, "id", entry.id) || !value.contains("slots"))
@@ -143,6 +154,24 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
                 || request.empty() || fingerprint.empty()
                 || !snapshot.completedTransfers.emplace(request, fingerprint).second)
                 return invalid<Snapshot>("invalid transfer receipt");
+        }
+        if (root.contains("crafts")) for (const auto& value : root["crafts"]) {
+            std::string request;
+            CraftReceipt receipt;
+            std::uint32_t place = 0;
+            if (!text(value, "request", request)
+                || !text(value, "output", receipt.outputItemId)
+                || !u32(value, "place", place)
+                || !text(value, "owner", receipt.destination.ownerId)
+                || !text(value, "slot", receipt.destination.slot)
+                || place > static_cast<std::uint32_t>(Place::Equipment)
+                || request.empty() || receipt.outputItemId.empty()
+                || receipt.destination.ownerId.empty())
+                return invalid<Snapshot>("invalid craft receipt");
+            receipt.destination.place = static_cast<Place>(place);
+            if (!snapshot.completedCrafts.emplace(std::move(request),
+                                                   std::move(receipt)).second)
+                return invalid<Snapshot>("duplicate craft receipt");
         }
         return snapshot;
     } catch (const std::exception& ex) {

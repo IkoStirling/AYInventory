@@ -14,7 +14,7 @@ namespace ayt::inventory {
 
 enum class Error {
     Invalid, Missing, Duplicate, Occupied, Capacity, Stale, Incompatible,
-    ContentVersion, Overflow
+    ContentVersion, Overflow, Insufficient, Denied
 };
 
 struct Diagnostic {
@@ -70,16 +70,38 @@ struct EquipmentOwner {
     bool operator==(const EquipmentOwner&) const = default;
 };
 
+/// A data-authored exchange. Each input definition may occur once; a game
+/// chooses the recipe and its eligibility rules before calling Store.
+struct Recipe {
+    struct Ingredient {
+        std::string definitionId;
+        std::uint32_t quantity = 0;
+        bool operator==(const Ingredient&) const = default;
+    };
+    std::string id;
+    std::vector<Ingredient> inputs;
+    std::string outputDefinitionId;
+    std::uint32_t outputQuantity = 0;
+    bool operator==(const Recipe&) const = default;
+};
+
+struct CraftReceipt {
+    std::string outputItemId;
+    Location destination;
+    bool operator==(const CraftReceipt&) const = default;
+};
+
 /// Versioned value snapshot. Restore validates every item and its sole owner
 /// before swapping state, so invalid saves do not mutate the current store.
 struct Snapshot {
-    std::uint32_t schemaVersion = 2;
+    std::uint32_t schemaVersion = 3;
     std::uint32_t catalogVersion = 0;
     std::uint64_t nextAbilityBindingId = 1;
     std::vector<Container> containers;
     std::vector<EquipmentOwner> actors;
     std::vector<Item> items;
     std::map<std::string, std::string> completedTransfers;
+    std::map<std::string, CraftReceipt> completedCrafts;
 };
 
 /// Single-owner inventory state. Do not retain Item references across writes.
@@ -110,11 +132,27 @@ public:
     Result<void> removeContainer(std::string_view id);
     Result<void> removeEquipmentOwner(std::string_view id);
 
+    /// Lock recipe inputs in a registered container without consuming them.
+    /// Pending reservations are runtime-only: saving cancels them implicitly,
+    /// leaving the original material counts in the persisted snapshot.
+    Result<void> reserveCraft(const Recipe& recipe,
+                              std::string_view sourceContainerId,
+                              std::string requestId);
+    /// Commit all deductions and one output as one Store state swap. A failed
+    /// commit keeps the reservation and all input units untouched.
+    Result<void> commitCraft(std::string_view requestId,
+                             std::string outputItemId, Location destination);
+    Result<void> cancelCraft(std::string_view requestId);
+    [[nodiscard]] bool hasContainer(std::string_view id) const;
+
     [[nodiscard]] const Item* findItem(std::string_view id) const;
     [[nodiscard]] const Definition* findDefinition(std::string_view id) const;
     [[nodiscard]] std::optional<std::string> occupying(const Location& location) const;
     [[nodiscard]] Snapshot snapshot() const;
     Result<void> restore(const Snapshot& snapshot);
+    /// Exchange complete states without allocation; used after an external
+    /// world transaction has published a matching staged transfer.
+    void swap(Store& other) noexcept;
     [[nodiscard]] std::uint32_t catalogVersion() const noexcept { return _catalogVersion; }
 
     /// Read-only descriptor for a gameplay adapter: map the stable instance
@@ -145,6 +183,16 @@ private:
     std::map<std::string, EquipmentOwner> _actors;
     std::map<std::string, Item> _items;
     std::map<std::string, std::string> _completedTransfers;
+    struct ReservedInput { std::string itemId; std::uint32_t quantity = 0; };
+    struct Reservation {
+        Recipe recipe;
+        std::string sourceContainerId;
+        std::vector<ReservedInput> inputs;
+    };
+    std::map<std::string, Reservation> _reservations;
+    std::map<std::string, std::uint32_t> _reservedByItem;
+    std::map<std::string, CraftReceipt> _completedCrafts;
+    [[nodiscard]] bool isReserved(std::string_view itemId) const;
 };
 
 } // namespace ayt::inventory

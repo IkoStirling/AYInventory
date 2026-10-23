@@ -165,11 +165,18 @@ Result<void> Store::transfer(std::string_view itemId,
     const auto fingerprint = transferFingerprint(itemId, expectedSource, destination);
     if (const auto done = _completedTransfers.find(requestId);
         done != _completedTransfers.end()) {
-        if (done->second == fingerprint) return {};
+        if (done->second == fingerprint) {
+            const auto current = _items.find(std::string(itemId));
+            if (current != _items.end() && current->second.location == destination)
+                return {};
+            return reject<void>(Error::Stale, "transfer was superseded after receipt");
+        }
         return reject<void>(Error::Duplicate, "request ID reused for another transfer");
     }
     const auto found = _items.find(std::string(itemId));
     if (found == _items.end()) return reject<void>(Error::Missing, "item missing");
+    if (isReserved(itemId))
+        return reject<void>(Error::Occupied, "item has reserved crafting units");
     if (found->second.location != expectedSource)
         return reject<void>(Error::Stale, "item source changed");
     if (destination == expectedSource)
@@ -189,6 +196,8 @@ Result<void> Store::split(std::string_view itemId, std::uint32_t quantity,
 {
     const auto source = _items.find(std::string(itemId));
     if (source == _items.end()) return reject<void>(Error::Missing, "source item missing");
+    if (isReserved(itemId))
+        return reject<void>(Error::Occupied, "item has reserved crafting units");
     if (newItemId.empty() || _items.contains(newItemId))
         return reject<void>(Error::Duplicate, "new instance ID is empty or used");
     if (quantity == 0 || quantity >= source->second.quantity)
@@ -207,6 +216,8 @@ Result<void> Store::merge(std::string_view sourceId, std::string_view targetId,
     const auto target = _items.find(std::string(targetId));
     if (source == _items.end() || target == _items.end())
         return reject<void>(Error::Missing, "merge item missing");
+    if (isReserved(sourceId) || isReserved(targetId))
+        return reject<void>(Error::Occupied, "merge item has reserved crafting units");
     if (source->second.definitionId != target->second.definitionId)
         return reject<void>(Error::Incompatible, "merge definitions differ");
     if (quantity == 0 || quantity > source->second.quantity)
@@ -225,8 +236,125 @@ Result<void> Store::merge(std::string_view sourceId, std::string_view targetId,
 
 Result<void> Store::destroyItem(std::string_view itemId)
 {
+    if (isReserved(itemId))
+        return reject<void>(Error::Occupied, "item has reserved crafting units");
     if (!_items.erase(std::string(itemId)))
         return reject<void>(Error::Missing, "item missing");
+    return {};
+}
+
+bool Store::hasContainer(std::string_view id) const
+{
+    return _containers.contains(std::string(id));
+}
+
+bool Store::isReserved(std::string_view itemId) const
+{
+    const auto found = _reservedByItem.find(std::string(itemId));
+    return found != _reservedByItem.end() && found->second != 0;
+}
+
+Result<void> Store::reserveCraft(const Recipe& recipe,
+                                 std::string_view sourceContainerId,
+                                 std::string requestId)
+{
+    if (requestId.empty() || recipe.id.empty() || recipe.inputs.empty()
+        || recipe.outputDefinitionId.empty() || recipe.outputQuantity == 0)
+        return reject<void>(Error::Invalid, "incomplete recipe or request ID");
+    if (_completedCrafts.contains(requestId))
+        return reject<void>(Error::Duplicate, "craft request already completed");
+    if (const auto existing = _reservations.find(requestId);
+        existing != _reservations.end()) {
+        if (existing->second.recipe == recipe
+            && existing->second.sourceContainerId == sourceContainerId) return {};
+        return reject<void>(Error::Duplicate, "craft request ID reused");
+    }
+    if (!hasContainer(sourceContainerId))
+        return reject<void>(Error::Missing, "material container missing");
+    const auto output = findDefinition(recipe.outputDefinitionId);
+    if (!output) return reject<void>(Error::Missing, "output definition missing");
+    if (recipe.outputQuantity > output->maxStack)
+        return reject<void>(Error::Capacity, "output exceeds stack limit");
+    Reservation staged{recipe, std::string(sourceContainerId), {}};
+    std::set<std::string> seenDefinitions;
+    for (const auto& ingredient : recipe.inputs) {
+        if (ingredient.definitionId.empty() || ingredient.quantity == 0
+            || !seenDefinitions.insert(ingredient.definitionId).second)
+            return reject<void>(Error::Invalid, "invalid or repeated recipe input");
+        if (!findDefinition(ingredient.definitionId))
+            return reject<void>(Error::Missing, "input definition missing");
+        auto remaining = ingredient.quantity;
+        for (const auto& [id, item] : _items) {
+            if (item.location.place != Place::Container
+                || item.location.ownerId != sourceContainerId
+                || item.definitionId != ingredient.definitionId) continue;
+            const auto reserved = _reservedByItem.contains(id) ? _reservedByItem.at(id) : 0;
+            if (reserved > item.quantity)
+                return reject<void>(Error::Invalid, "reservation state exceeds item quantity");
+            const auto take = std::min(remaining, item.quantity - reserved);
+            if (take != 0) staged.inputs.push_back({id, take});
+            remaining -= take;
+            if (remaining == 0) break;
+        }
+        if (remaining != 0)
+            return reject<void>(Error::Insufficient, "recipe materials unavailable");
+    }
+    // Publish only after all material groups have been selected.
+    const auto [entry, inserted] = _reservations.emplace(std::move(requestId),
+                                                          std::move(staged));
+    (void)inserted;
+    for (const auto& input : entry->second.inputs)
+        _reservedByItem[input.itemId] += input.quantity;
+    return {};
+}
+
+Result<void> Store::cancelCraft(std::string_view requestId)
+{
+    const auto found = _reservations.find(std::string(requestId));
+    if (found == _reservations.end())
+        return reject<void>(Error::Missing, "craft reservation missing");
+    for (const auto& input : found->second.inputs) {
+        auto reserved = _reservedByItem.find(input.itemId);
+        reserved->second -= input.quantity;
+        if (reserved->second == 0) _reservedByItem.erase(reserved);
+    }
+    _reservations.erase(found);
+    return {};
+}
+
+Result<void> Store::commitCraft(std::string_view requestId,
+                                std::string outputItemId, Location destination)
+{
+    const CraftReceipt receipt{outputItemId, destination};
+    if (const auto completed = _completedCrafts.find(std::string(requestId));
+        completed != _completedCrafts.end()) {
+        if (completed->second == receipt) return {};
+        return reject<void>(Error::Duplicate, "craft request replay changed output");
+    }
+    const auto found = _reservations.find(std::string(requestId));
+    if (found == _reservations.end())
+        return reject<void>(Error::Missing, "craft reservation missing");
+    if (outputItemId.empty()) return reject<void>(Error::Invalid, "output ID missing");
+    Store candidate = *this;
+    const auto reservation = candidate._reservations.at(std::string(requestId));
+    (void)candidate.cancelCraft(requestId);
+    for (const auto& input : reservation.inputs) {
+        auto item = candidate._items.find(input.itemId);
+        if (item == candidate._items.end() || item->second.quantity < input.quantity)
+            return reject<void>(Error::Stale, "reserved material changed");
+        item->second.quantity -= input.quantity;
+        if (item->second.quantity == 0) candidate._items.erase(item);
+    }
+    if (auto created = candidate.createItem({outputItemId,
+            reservation.recipe.outputDefinitionId,
+            reservation.recipe.outputQuantity, std::move(destination)}); !created)
+        return created;
+    candidate._completedCrafts.emplace(std::string(requestId), receipt);
+    _items.swap(candidate._items);
+    _reservations.swap(candidate._reservations);
+    _reservedByItem.swap(candidate._reservedByItem);
+    _completedCrafts.swap(candidate._completedCrafts);
+    _nextAbilityBindingId = candidate._nextAbilityBindingId;
     return {};
 }
 
@@ -264,6 +392,21 @@ const Definition* Store::findDefinition(std::string_view id) const
     return found == _definitions.end() ? nullptr : &found->second;
 }
 
+void Store::swap(Store& other) noexcept
+{
+    using std::swap;
+    swap(_catalogVersion, other._catalogVersion);
+    swap(_nextAbilityBindingId, other._nextAbilityBindingId);
+    _definitions.swap(other._definitions);
+    _containers.swap(other._containers);
+    _actors.swap(other._actors);
+    _items.swap(other._items);
+    _completedTransfers.swap(other._completedTransfers);
+    _completedCrafts.swap(other._completedCrafts);
+    _reservations.swap(other._reservations);
+    _reservedByItem.swap(other._reservedByItem);
+}
+
 Snapshot Store::snapshot() const
 {
     Snapshot result;
@@ -273,13 +416,17 @@ Snapshot Store::snapshot() const
     for (const auto& [_, actor] : _actors) result.actors.push_back(actor);
     for (const auto& [_, item] : _items) result.items.push_back(item);
     result.completedTransfers = _completedTransfers;
+    result.completedCrafts = _completedCrafts;
     return result;
 }
 
 Result<void> Store::restore(const Snapshot& saved)
 {
-    if (saved.schemaVersion != 2 || saved.catalogVersion != _catalogVersion)
+    if ((saved.schemaVersion != 2 && saved.schemaVersion != 3)
+        || saved.catalogVersion != _catalogVersion)
         return reject<void>(Error::ContentVersion, "inventory snapshot version mismatch");
+    if (saved.schemaVersion == 2 && !saved.completedCrafts.empty())
+        return reject<void>(Error::Invalid, "v2 snapshot cannot contain craft receipts");
     Store next(_catalogVersion);
     next._definitions = _definitions;
     for (const auto& container : saved.containers)
@@ -300,11 +447,24 @@ Result<void> Store::restore(const Snapshot& saved)
             return reject<void>(Error::Invalid, "invalid transfer receipt");
     }
     next._completedTransfers = saved.completedTransfers;
+    for (const auto& [request, receipt] : saved.completedCrafts) {
+        if (request.empty() || receipt.outputItemId.empty()
+            || receipt.destination.ownerId.empty()
+            || receipt.destination.place > Place::Equipment
+            || (receipt.destination.place == Place::World
+                ? !receipt.destination.slot.empty()
+                : receipt.destination.slot.empty()))
+            return reject<void>(Error::Invalid, "invalid craft receipt");
+    }
+    next._completedCrafts = saved.completedCrafts;
     next._nextAbilityBindingId = saved.nextAbilityBindingId;
     _containers.swap(next._containers);
     _actors.swap(next._actors);
     _items.swap(next._items);
     _completedTransfers.swap(next._completedTransfers);
+    _completedCrafts.swap(next._completedCrafts);
+    _reservations.clear();
+    _reservedByItem.clear();
     _nextAbilityBindingId = next._nextAbilityBindingId;
     return {};
 }

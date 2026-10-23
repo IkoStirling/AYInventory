@@ -99,7 +99,7 @@ void restoreAndCorruption()
     check(store.createItem({"sword", "iron-sword", 1, drop}).has_value(), "item");
     check(store.transfer("sword", drop, chestA, "pickup").has_value(), "transfer");
     auto saved = store.snapshot();
-    check(saved.schemaVersion == 2 && saved.nextAbilityBindingId == 2,
+    check(saved.schemaVersion == 3 && saved.nextAbilityBindingId == 2,
           "Ability binding allocator persisted");
     auto restored = makeStore();
     check(restored.restore(saved).has_value(), "snapshot restore");
