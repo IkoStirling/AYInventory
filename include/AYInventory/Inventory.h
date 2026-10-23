@@ -1,0 +1,150 @@
+#pragma once
+
+#include <cstdint>
+#include <expected>
+#include <map>
+#include <optional>
+#include <set>
+#include <span>
+#include <string>
+#include <string_view>
+#include <vector>
+
+namespace ayt::inventory {
+
+enum class Error {
+    Invalid, Missing, Duplicate, Occupied, Capacity, Stale, Incompatible,
+    ContentVersion, Overflow
+};
+
+struct Diagnostic {
+    Error code = Error::Invalid;
+    std::string message;
+};
+
+template<class T> using Result = std::expected<T, Diagnostic>;
+
+/// Game authored item type. Values are data; economic/drop rules stay in game code.
+struct Definition {
+    std::string id;
+    std::uint32_t maxStack = 1;
+    std::set<std::string> equipSlots;
+    /// Existing AYAbility configuration ID; zero means no Ability binding.
+    std::uint64_t abilityConfiguration = 0;
+    /// Existing AYStats IDs and flat values, applied only while equipped.
+    struct StatBonus { std::uint64_t statId = 0; std::int64_t flat = 0; };
+    std::vector<StatBonus> statBonuses;
+};
+
+enum class Place { World, Container, Equipment };
+
+/// ownerId is a persistent Entity/content ID: drop object, container, or actor.
+/// World uses an empty slot; Container and Equipment use stable slot names.
+struct Location {
+    Place place = Place::World;
+    std::string ownerId;
+    std::string slot;
+    bool operator==(const Location&) const = default;
+};
+
+struct Item {
+    std::string id;
+    std::string definitionId;
+    std::uint32_t quantity = 1;
+    Location location;
+    /// Unique, monotonic AYAbility instance token. Zero for non-Ability items;
+    /// Store assigns it once at creation and persists it through snapshot.
+    std::uint64_t abilityBindingId = 0;
+    bool operator==(const Item&) const = default;
+};
+
+struct Container {
+    std::string id;
+    std::set<std::string> slots;
+    bool operator==(const Container&) const = default;
+};
+
+struct EquipmentOwner {
+    std::string id;
+    std::set<std::string> slots;
+    bool operator==(const EquipmentOwner&) const = default;
+};
+
+/// Versioned value snapshot. Restore validates every item and its sole owner
+/// before swapping state, so invalid saves do not mutate the current store.
+struct Snapshot {
+    std::uint32_t schemaVersion = 2;
+    std::uint32_t catalogVersion = 0;
+    std::uint64_t nextAbilityBindingId = 1;
+    std::vector<Container> containers;
+    std::vector<EquipmentOwner> actors;
+    std::vector<Item> items;
+    std::map<std::string, std::string> completedTransfers;
+};
+
+/// Single-owner inventory state. Do not retain Item references across writes.
+/// Commands are atomic on validation failure and transfer request IDs survive
+/// Snapshot/restore for retry safety. Not thread-safe; tick owner serializes it.
+class Store {
+public:
+    static Result<Store> create(std::uint32_t catalogVersion,
+                                std::vector<Definition> definitions);
+
+    Result<void> addContainer(Container container);
+    Result<void> addEquipmentOwner(EquipmentOwner actor);
+    Result<void> createItem(Item item);
+
+    /// Transfer one entire instance. expectedSource prevents stale repeats;
+    /// requestId makes exact retries idempotent, including after load.
+    Result<void> transfer(std::string_view itemId, const Location& expectedSource,
+                          Location destination, std::string requestId);
+    /// Split a stack into a new explicitly identified instance at destination.
+    Result<void> split(std::string_view itemId, std::uint32_t quantity,
+                       std::string newItemId, Location destination);
+    /// Merge same-definition stacks; source identity retires on full merge.
+    Result<void> merge(std::string_view sourceId, std::string_view targetId,
+                       std::uint32_t quantity);
+    /// Explicit removal. A container or actor with owned items cannot be
+    /// unregistered until a game transfers/disposes those items first.
+    Result<void> destroyItem(std::string_view itemId);
+    Result<void> removeContainer(std::string_view id);
+    Result<void> removeEquipmentOwner(std::string_view id);
+
+    [[nodiscard]] const Item* findItem(std::string_view id) const;
+    [[nodiscard]] const Definition* findDefinition(std::string_view id) const;
+    [[nodiscard]] std::optional<std::string> occupying(const Location& location) const;
+    [[nodiscard]] Snapshot snapshot() const;
+    Result<void> restore(const Snapshot& snapshot);
+    [[nodiscard]] std::uint32_t catalogVersion() const noexcept { return _catalogVersion; }
+
+    /// Read-only descriptor for a gameplay adapter: map the stable instance
+    /// ID to AYAbility equipment and AYStats owned modifiers at a Sim boundary.
+    struct EquippedProfile {
+        std::string itemId;
+        std::string actorId;
+        std::string slot;
+        std::uint64_t abilityBindingId = 0;
+        std::uint64_t abilityConfiguration = 0;
+        std::vector<Definition::StatBonus> statBonuses;
+    };
+    [[nodiscard]] std::vector<EquippedProfile> equippedProfiles(
+        std::string_view actorId) const;
+
+private:
+    explicit Store(std::uint32_t version) : _catalogVersion(version) {}
+    Result<void> validateItem(const Item& item,
+                              std::optional<std::string_view> ignoreId = {}) const;
+    std::string transferFingerprint(std::string_view itemId,
+                                    const Location& from,
+                                    const Location& to) const;
+
+    std::uint32_t _catalogVersion = 0;
+    std::uint64_t _nextAbilityBindingId = 1;
+    std::map<std::string, Definition> _definitions;
+    std::map<std::string, Container> _containers;
+    std::map<std::string, EquipmentOwner> _actors;
+    std::map<std::string, Item> _items;
+    std::map<std::string, std::string> _completedTransfers;
+};
+
+} // namespace ayt::inventory
