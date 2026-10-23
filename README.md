@@ -55,9 +55,11 @@ ctest --test-dir out/build/ayinventory --output-on-failure
 `chooseFocus` 选最近候选，`activate` 在操作当下重验有效性与权限，完成拾取或返回可打开的容器 ID。
 `placeWorldItem` 先暂存所有权转移，调用 Host 空间检查和对象发布；发布成功后才切换 Store。
 Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 AYScene Entity 与 AYPhysics 查询
-由接入方实现。
+可选用 `AYInventory::World3DHost` 的 `ScenePhysicsHost3D` 连接。游戏注入当前
+`Scene::world()`、`IPhysicsQuery`、视线与权限回调；新放置对象的 ID 必须是 Entity
+支持的 32 位小写十六进制持久 ID。该适配以射线重验拾取，并用保守球体重叠检查放置空间。
+独立 Core 构建仍无需 Scene/Physics。
 
 示例：`AYInventoryPickupExample` 演示世界掉落→背包→装备；
 `AYInventoryCraftPlaceExample` 演示制作→世界放置。详细失败语义见 [design.md](design.md)。
 实际 Host 映射顺序见 [world-host-integration.md](docs/world-host-integration.md)。
-详细失败语义见 [design.md](design.md)。

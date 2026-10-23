@@ -53,9 +53,18 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   并暂存对象，`publish` 必须全成或全不成；失败后 `abort` 清理暂存，Store 无变化。
   发布成功后 Store 通过无分配交换写入世界归属。重复请求由 Host 验证已发布对象及
   姿态，不能再次发布。Host 应用相同稳定 ID 重建读档后的实体。
-- 事务原子边界限定在 Store 和满足回调契约的 Host 实现。此模块只提供回调协议和
-  演示适配，不包含实际 AYPhysics 重叠查询、AYScene Entity 创建或持久化物体姿态。
-  集成方须在 World 卸载/恢复边界先保存场景实体和 Store，再在新 World 重建对应对象。
+- `ScenePhysicsHost3D` 接受当前 Scene 的 `World&`、`IPhysicsQuery&`、`Store&`，
+  以及游戏拥有的当前视线和权限回调。焦点和激活各自发起当前 raycast，按有效 3D
+  刚体句柄解析 Entity，再用 `persistentId` 对应 Store 的世界物品或容器。
+  拾取仅删除没有子实体的当前 Entity；任何失败都不让 Store 发布预提交转移。
+- 放置将物品请求的稳定世界 ID 直接用作 Entity 持久 ID，因此具体适配要求 32 位
+  小写十六进制 ID。`prepare` 以半尺寸外接球调用当前 overlapSphere，拒绝占用和
+  重复 ID；`publish` 创建 Spatial Entity、世界姿态、静态 3D 刚体和盒碰撞描述。
+  创建过程失败清理新 Entity，成功后 Store 才交换所有权。重试验证 ID、姿态与碰撞
+  半尺寸；实际物理体在 EntityPhysicsBridge 的下一次预物理同步产生。
+- 球体检测对旋转盒和细长对象保守，可能拒绝本可放置的空间；游戏可按需另行实现更
+  精确的 IPlacementHost。适配不隐式注册 Entity 组件、保存场景或实现游戏权限；调用者
+  在 Sim 边界使用它，World/Store 卸载和恢复时重新注入当前实例。
 
 ## 后续
 

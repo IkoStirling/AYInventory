@@ -13,6 +13,19 @@ else()
     target_compile_options(AYInventoryCore PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
+if(TARGET AYEntityCore AND TARGET AYPhysics)
+    add_library(AYInventoryWorld3DHost STATIC src/ScenePhysicsHost3D.cpp)
+    add_library(AYInventory::World3DHost ALIAS AYInventoryWorld3DHost)
+    target_compile_features(AYInventoryWorld3DHost PUBLIC cxx_std_23)
+    target_include_directories(AYInventoryWorld3DHost PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_link_libraries(AYInventoryWorld3DHost PUBLIC
+        AYInventoryCore AYEntityCore AYPhysics)
+    if(MSVC)
+        target_compile_options(AYInventoryWorld3DHost PRIVATE /W4 /utf-8)
+    endif()
+endif()
+
 option(AY_INVENTORY_BUILD_JSON "Build versioned inventory snapshot JSON codec" ON)
 if(AY_INVENTORY_BUILD_JSON)
     find_package(nlohmann_json CONFIG QUIET)
@@ -46,6 +59,12 @@ if(BUILD_TESTING)
         target_compile_definitions(AYInventoryWorldTransactionTest PRIVATE AY_INVENTORY_JSON=1)
     endif()
     add_test(NAME AYInventoryWorldTransactionTest COMMAND AYInventoryWorldTransactionTest)
+    if(TARGET AYInventoryWorld3DHost AND TARGET AYEntity)
+        add_executable(AYInventoryWorld3DHostTest unittest/ScenePhysicsHost3DTest.cpp)
+        target_link_libraries(AYInventoryWorld3DHostTest PRIVATE
+            AYInventoryWorld3DHost AYEntity)
+        add_test(NAME AYInventoryWorld3DHostTest COMMAND AYInventoryWorld3DHostTest)
+    endif()
     if(TARGET AYApplicationSaveGame AND TARGET AYInventoryJson)
         add_executable(AYInventoryLedgerTest unittest/InventoryLedgerTest.cpp)
         target_link_libraries(AYInventoryLedgerTest PRIVATE

@@ -30,5 +30,13 @@ layers on the same Sim thread while running one interaction command.
 The current public physics query facade has ray and sphere overlap queries.
 Sphere overlap is conservative for oriented boxes or irregular footprints.
 The Host may use a more exact project-specific spatial query where required.
-The module's sample Host demonstrates the protocol; it does not install a
-concrete Scene/Physics bridge or write game-specific permission rules.
+For ordinary 3D Entity scenes, link `AYInventory::World3DHost` and construct
+`ScenePhysicsHost3D(scene.world(), *engineHost.physicsQuery(), store, view,
+permission)` after registering Entity physics components. The view callback
+supplies a fresh ray and reach for each focus or activation; the permission
+callback owns game rules. World object IDs used by this concrete adapter are
+canonical 32-digit lowercase hexadecimal Entity persistent IDs. Published
+objects carry a static 3D rigid-body and box collider description; run the
+normal EntityPhysicsBridge pre-physics sync to make them physically queryable.
+The bounding-sphere occupancy check is conservative, so a game needing exact
+rotated-box placement can provide its own `IPlacementHost`.
