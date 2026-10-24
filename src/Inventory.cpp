@@ -123,6 +123,8 @@ Result<void> Store::createItem(Item item)
 {
     if (_items.contains(item.id))
         return reject<void>(Error::Duplicate, "duplicate item instance ID");
+    if (_retiredItemIds.contains(item.id))
+        return reject<void>(Error::Stale, "retired item instance ID cannot be reused");
     const auto definition = _definitions.find(item.definitionId);
     if (definition == _definitions.end())
         return reject<void>(Error::Missing, "unknown item definition");
@@ -228,6 +230,8 @@ Result<void> Store::merge(std::string_view sourceId, std::string_view targetId,
     if (source->second.location.place == Place::Equipment
         || target->second.location.place == Place::Equipment)
         return reject<void>(Error::Incompatible, "cannot merge equipped items");
+    if (quantity == source->second.quantity)
+        _retiredItemIds.insert(source->first);
     target->second.quantity += quantity;
     source->second.quantity -= quantity;
     if (source->second.quantity == 0) _items.erase(source);
@@ -238,8 +242,11 @@ Result<void> Store::destroyItem(std::string_view itemId)
 {
     if (isReserved(itemId))
         return reject<void>(Error::Occupied, "item has reserved crafting units");
-    if (!_items.erase(std::string(itemId)))
+    const auto found = _items.find(std::string(itemId));
+    if (found == _items.end())
         return reject<void>(Error::Missing, "item missing");
+    _retiredItemIds.insert(found->first);
+    _items.erase(found);
     return {};
 }
 
@@ -343,7 +350,10 @@ Result<void> Store::commitCraft(std::string_view requestId,
         if (item == candidate._items.end() || item->second.quantity < input.quantity)
             return reject<void>(Error::Stale, "reserved material changed");
         item->second.quantity -= input.quantity;
-        if (item->second.quantity == 0) candidate._items.erase(item);
+        if (item->second.quantity == 0) {
+            candidate._retiredItemIds.insert(item->first);
+            candidate._items.erase(item);
+        }
     }
     if (auto created = candidate.createItem({outputItemId,
             reservation.recipe.outputDefinitionId,
@@ -351,6 +361,7 @@ Result<void> Store::commitCraft(std::string_view requestId,
         return created;
     candidate._completedCrafts.emplace(std::string(requestId), receipt);
     _items.swap(candidate._items);
+    _retiredItemIds.swap(candidate._retiredItemIds);
     _reservations.swap(candidate._reservations);
     _reservedByItem.swap(candidate._reservedByItem);
     _completedCrafts.swap(candidate._completedCrafts);
@@ -401,6 +412,7 @@ void Store::swap(Store& other) noexcept
     _containers.swap(other._containers);
     _actors.swap(other._actors);
     _items.swap(other._items);
+    _retiredItemIds.swap(other._retiredItemIds);
     _completedTransfers.swap(other._completedTransfers);
     _completedCrafts.swap(other._completedCrafts);
     _reservations.swap(other._reservations);
@@ -415,6 +427,7 @@ Snapshot Store::snapshot() const
     for (const auto& [_, container] : _containers) result.containers.push_back(container);
     for (const auto& [_, actor] : _actors) result.actors.push_back(actor);
     for (const auto& [_, item] : _items) result.items.push_back(item);
+    result.retiredItemIds = _retiredItemIds;
     result.completedTransfers = _completedTransfers;
     result.completedCrafts = _completedCrafts;
     return result;
@@ -422,11 +435,14 @@ Snapshot Store::snapshot() const
 
 Result<void> Store::restore(const Snapshot& saved)
 {
-    if ((saved.schemaVersion != 2 && saved.schemaVersion != 3)
+    if ((saved.schemaVersion != 2 && saved.schemaVersion != 3
+         && saved.schemaVersion != 4)
         || saved.catalogVersion != _catalogVersion)
         return reject<void>(Error::ContentVersion, "inventory snapshot version mismatch");
     if (saved.schemaVersion == 2 && !saved.completedCrafts.empty())
         return reject<void>(Error::Invalid, "v2 snapshot cannot contain craft receipts");
+    if (saved.schemaVersion < 4 && !saved.retiredItemIds.empty())
+        return reject<void>(Error::Invalid, "legacy snapshot cannot contain retired IDs");
     Store next(_catalogVersion);
     next._definitions = _definitions;
     for (const auto& container : saved.containers)
@@ -439,6 +455,11 @@ Result<void> Store::restore(const Snapshot& saved)
     });
     for (const auto& item : items)
         if (auto result = next.createItem(item); !result) return result;
+    for (const auto& id : saved.retiredItemIds) {
+        if (id.empty() || next._items.contains(id))
+            return reject<void>(Error::Invalid, "retired item ID is empty or still active");
+    }
+    next._retiredItemIds = saved.retiredItemIds;
     if (saved.nextAbilityBindingId < next._nextAbilityBindingId
         || saved.nextAbilityBindingId == 0)
         return reject<void>(Error::Invalid, "Ability binding allocator watermark is stale");
@@ -461,6 +482,7 @@ Result<void> Store::restore(const Snapshot& saved)
     _containers.swap(next._containers);
     _actors.swap(next._actors);
     _items.swap(next._items);
+    _retiredItemIds.swap(next._retiredItemIds);
     _completedTransfers.swap(next._completedTransfers);
     _completedCrafts.swap(next._completedCrafts);
     _reservations.clear();

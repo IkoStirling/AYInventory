@@ -99,7 +99,7 @@ void restoreAndCorruption()
     check(store.createItem({"sword", "iron-sword", 1, drop}).has_value(), "item");
     check(store.transfer("sword", drop, chestA, "pickup").has_value(), "transfer");
     auto saved = store.snapshot();
-    check(saved.schemaVersion == 3 && saved.nextAbilityBindingId == 2,
+    check(saved.schemaVersion == 4 && saved.nextAbilityBindingId == 2,
           "Ability binding allocator persisted");
     auto restored = makeStore();
     check(restored.restore(saved).has_value(), "snapshot restore");
@@ -169,6 +169,63 @@ void abilityBindingSurvivesSplit()
           && restored->findItem("kit-2")->abilityBindingId == 2,
           "binding IDs survive snapshot");
 }
+
+void retiredInstanceIdsCannotImpersonateOldTransfers()
+{
+    auto store = makeStore();
+    const Location drop{Place::World, "drop/old", ""};
+    const Location bag{Place::Container, "chest", "a"};
+    check(store.createItem({"sword-old", "iron-sword", 1, drop}).has_value(), "old item");
+    check(store.transfer("sword-old", drop, bag, "pickup-old").has_value(), "old pickup");
+    check(store.destroyItem("sword-old").has_value(), "destroy old item");
+    check(!store.createItem({"sword-old", "iron-sword", 1, bag}),
+          "destroyed instance ID cannot be reused");
+    check(!store.transfer("sword-old", drop, bag, "pickup-old"),
+          "old receipt cannot accept an absent instance");
+    check(store.createItem({"new-sword", "iron-sword", 1, bag}).has_value(),
+          "distinct identity can use freed slot");
+    const auto saved = store.snapshot();
+    check(saved.retiredItemIds.contains("sword-old"), "retirement saved");
+
+    auto restored = makeStore();
+    check(restored.restore(saved).has_value(), "retirement restored");
+    check(!restored.createItem({"sword-old", "iron-sword", 1, drop}),
+          "retired ID remains unavailable after restore");
+    auto corrupt = saved;
+    corrupt.retiredItemIds.insert("new-sword");
+    check(!restored.restore(corrupt), "active and retired overlap rejected");
+    check(restored.findItem("new-sword") != nullptr,
+          "failed restore preserves active ownership");
+#ifdef AY_INVENTORY_JSON
+    auto encoded = encodeSnapshotJson(saved);
+    check(encoded.has_value(), "encode retired identities");
+    auto decoded = decodeSnapshotJson(*encoded);
+    check(decoded.has_value() && decoded->retiredItemIds == saved.retiredItemIds,
+          "JSON retains retired identities");
+    check(restored.restore(*decoded).has_value(), "JSON retired restore");
+    check(!restored.createItem({"sword-old", "iron-sword", 1, drop}),
+          "JSON restore blocks identity reuse");
+    check(!decodeSnapshotJson(R"({"format":"AliyatInventory","schemaVersion":4,"catalogVersion":3,"nextAbilityBindingId":1,"containers":[],"actors":[],"items":[],"transfers":[],"crafts":[],"retiredItems":["x","x"]})"),
+          "duplicate retired IDs rejected during JSON decode");
+#endif
+}
+
+void fullMergeRetiresSourceIdentity()
+{
+    auto store = makeStore();
+    const Location first{Place::Container, "chest", "a"};
+    const Location second{Place::Container, "chest", "b"};
+    check(store.createItem({"stack-source", "potion", 2, first}).has_value(), "source stack");
+    check(store.createItem({"stack-target", "potion", 8, second}).has_value(), "target stack");
+    check(store.merge("stack-source", "stack-target", 2).has_value(), "full merge");
+    check(store.findItem("stack-source") == nullptr
+          && store.findItem("stack-target")->quantity == 10,
+          "one remaining stack");
+    check(store.snapshot().retiredItemIds.contains("stack-source"),
+          "merged instance retired");
+    check(!store.createItem({"stack-source", "potion", 1, first}),
+          "merged instance ID cannot be reused");
+}
 } // namespace
 
 int main()
@@ -178,6 +235,8 @@ int main()
         stacksAndOwnerDestruction();
         restoreAndCorruption();
         abilityBindingSurvivesSplit();
+        retiredInstanceIdsCannotImpersonateOldTransfers();
+        fullMergeRetiresSourceIdentity();
         std::cout << "AYInventory: all ownership tests passed\n";
         return 0;
     } catch (const std::exception& error) {

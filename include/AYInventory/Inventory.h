@@ -91,22 +91,26 @@ struct CraftReceipt {
     bool operator==(const CraftReceipt&) const = default;
 };
 
-/// Versioned value snapshot. Restore validates every item and its sole owner
-/// before swapping state, so invalid saves do not mutate the current store.
+/// Versioned value snapshot. Restore validates every item, its sole owner and
+/// retired-ID disjointness before swapping; invalid saves leave Store intact.
 struct Snapshot {
-    std::uint32_t schemaVersion = 3;
+    std::uint32_t schemaVersion = 4;
     std::uint32_t catalogVersion = 0;
     std::uint64_t nextAbilityBindingId = 1;
     std::vector<Container> containers;
     std::vector<EquipmentOwner> actors;
     std::vector<Item> items;
+    /// Instance IDs removed by destruction, full merge or material consumption.
+    /// They cannot be reused after load. Legacy v2/v3 saves lack this history.
+    std::set<std::string> retiredItemIds;
     std::map<std::string, std::string> completedTransfers;
     std::map<std::string, CraftReceipt> completedCrafts;
 };
 
 /// Single-owner inventory state. Do not retain Item references across writes.
-/// Commands are atomic on validation failure and transfer request IDs survive
-/// Snapshot/restore for retry safety. Not thread-safe; tick owner serializes it.
+/// Commands are atomic on validation failure. Transfer receipts and retired
+/// instance IDs survive Snapshot/restore for retry safety. Not thread-safe;
+/// the tick owner serializes it.
 class Store {
 public:
     static Result<Store> create(std::uint32_t catalogVersion,
@@ -114,6 +118,8 @@ public:
 
     Result<void> addContainer(Container container);
     Result<void> addEquipmentOwner(EquipmentOwner actor);
+    /// Creates a fresh instance; an ID retired by destruction, full merge or
+    /// crafting may not be reused, including after a v4 snapshot restore.
     Result<void> createItem(Item item);
 
     /// Transfer one entire instance. expectedSource prevents stale repeats;
@@ -123,11 +129,13 @@ public:
     /// Split a stack into a new explicitly identified instance at destination.
     Result<void> split(std::string_view itemId, std::uint32_t quantity,
                        std::string newItemId, Location destination);
-    /// Merge same-definition stacks; source identity retires on full merge.
+    /// Merge same-definition stacks; source identity retires on full merge
+    /// and remains unavailable after a v4 snapshot restore.
     Result<void> merge(std::string_view sourceId, std::string_view targetId,
                        std::uint32_t quantity);
-    /// Explicit removal. A container or actor with owned items cannot be
-    /// unregistered until a game transfers/disposes those items first.
+    /// Explicit removal retires the instance ID. A container or actor with
+    /// owned items cannot be unregistered until the game transfers/disposes
+    /// those items first.
     Result<void> destroyItem(std::string_view itemId);
     Result<void> removeContainer(std::string_view id);
     Result<void> removeEquipmentOwner(std::string_view id);
@@ -182,6 +190,7 @@ private:
     std::map<std::string, Container> _containers;
     std::map<std::string, EquipmentOwner> _actors;
     std::map<std::string, Item> _items;
+    std::set<std::string> _retiredItemIds;
     std::map<std::string, std::string> _completedTransfers;
     struct ReservedInput { std::string itemId; std::uint32_t quantity = 0; };
     struct Reservation {

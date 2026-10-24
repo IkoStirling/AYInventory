@@ -59,6 +59,8 @@ Result<std::set<std::string>> slots(const Json& data)
 Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
 {
     try {
+        if (snapshot.schemaVersion < 4 && !snapshot.retiredItemIds.empty())
+            return invalid<std::string>("legacy inventory schema cannot encode retired IDs");
         Json root = {{"format", "AliyatInventory"},
                      {"schemaVersion", snapshot.schemaVersion},
                      {"catalogVersion", snapshot.catalogVersion},
@@ -66,6 +68,8 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
                      {"containers", Json::array()}, {"actors", Json::array()},
                      {"items", Json::array()}, {"transfers", Json::array()},
                      {"crafts", Json::array()}};
+        if (snapshot.schemaVersion >= 4)
+            root["retiredItems"] = snapshot.retiredItemIds;
         for (const auto& value : snapshot.containers)
             root["containers"].push_back({{"id", value.id}, {"slots", value.slots}});
         for (const auto& value : snapshot.actors)
@@ -112,8 +116,24 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
                 return invalid<Snapshot>(std::string("invalid ") + key + " array");
         if ((snapshot.schemaVersion == 3
              && (!root.contains("crafts") || !root.at("crafts").is_array()))
+            || (snapshot.schemaVersion == 4
+                && (!root.contains("crafts") || !root.at("crafts").is_array()))
             || (root.contains("crafts") && !root.at("crafts").is_array()))
             return invalid<Snapshot>("invalid crafts array");
+        if ((snapshot.schemaVersion == 4
+             && (!root.contains("retiredItems")
+                 || !root.at("retiredItems").is_array()))
+            || (snapshot.schemaVersion < 4 && root.contains("retiredItems")))
+            return invalid<Snapshot>("invalid retired items array");
+        if (snapshot.schemaVersion == 4) {
+            for (const auto& value : root["retiredItems"]) {
+                if (!value.is_string())
+                    return invalid<Snapshot>("retired item ID must be string");
+                auto id = value.get<std::string>();
+                if (id.empty() || !snapshot.retiredItemIds.insert(std::move(id)).second)
+                    return invalid<Snapshot>("empty or duplicate retired item ID");
+            }
+        }
         for (const auto& value : root["containers"]) {
             Container entry;
             if (!text(value, "id", entry.id) || !value.contains("slots"))

@@ -112,13 +112,16 @@ void craftReservations()
     check(!store.commitCraft("craft-1", "another", output),
           "request reuse rejects different output");
     auto saved = store.snapshot();
-    check(saved.completedCrafts.size() == 1 && saved.schemaVersion == 3,
+    check(saved.completedCrafts.size() == 1 && saved.schemaVersion == 4,
           "craft receipt saved");
     auto loaded = makeStore();
     check(loaded.restore(saved).has_value(), "restore crafted inventory");
     check(loaded.commitCraft("craft-1", "campfire-1", output).has_value(),
           "replay after restore");
     check(loaded.findItem("wood-1")->quantity == 2, "replay did not spend twice");
+    auto v3 = saved;
+    v3.schemaVersion = 3;
+    check(loaded.restore(v3).has_value(), "v3 craft save remains readable");
     auto corrupt = saved;
     corrupt.completedCrafts.at("craft-1").destination.place = Place::World;
     check(!loaded.restore(corrupt), "typed malformed craft receipt rejected");
@@ -131,6 +134,11 @@ void craftReservations()
     check(decoded.has_value() && loaded.restore(*decoded).has_value(), "JSON receipt");
     check(loaded.commitCraft("craft-1", "campfire-1", output).has_value(),
           "JSON replay safe");
+    auto oldEncoded = encodeSnapshotJson(v3);
+    check(oldEncoded.has_value(), "encode v3 fixture");
+    auto oldDecoded = decodeSnapshotJson(*oldEncoded);
+    check(oldDecoded.has_value() && loaded.restore(*oldDecoded).has_value(),
+          "v3 JSON craft save remains readable");
 #endif
 }
 
@@ -185,6 +193,11 @@ void craftAcrossStacks()
     check(store.findItem("wood-1") == nullptr
           && store.findItem("wood-2")->quantity == 2,
           "selected two stacks without extra consumption");
+    check(store.snapshot().retiredItemIds.contains("wood-1"),
+          "consumed material identity retired");
+    check(!store.createItem({"wood-1", "wood", 1,
+                             {Place::Container, "bag", "a"}}),
+          "consumed material ID cannot be reused");
 }
 
 void concurrentReservations()
@@ -201,6 +214,8 @@ void concurrentReservations()
     check(store.findItem("wood-1")->quantity == 1
           && store.findItem("iron-1") == nullptr,
           "overlapping reservations each spent once");
+    check(store.snapshot().retiredItemIds.contains("iron-1"),
+          "fully consumed ingredient retired");
 }
 
 void interactionAndPlacement()

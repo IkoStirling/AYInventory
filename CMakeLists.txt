@@ -69,6 +69,8 @@ if(BUILD_TESTING)
         add_executable(AYInventoryLedgerTest unittest/InventoryLedgerTest.cpp)
         target_link_libraries(AYInventoryLedgerTest PRIVATE
             AYInventoryJson AYApplicationSaveGame)
+        target_compile_definitions(AYInventoryLedgerTest PRIVATE
+            "AY_INVENTORY_LEDGER_TEST_ROOT=\"${CMAKE_CURRENT_BINARY_DIR}/inventory-ledger-test-output\"")
         add_test(NAME AYInventoryLedgerTest COMMAND AYInventoryLedgerTest)
     endif()
 endif()
