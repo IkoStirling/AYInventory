@@ -59,7 +59,7 @@ Result<std::set<std::string>> slots(const Json& data)
 Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
 {
     try {
-        if (snapshot.schemaVersion < 2 || snapshot.schemaVersion > 5)
+        if (snapshot.schemaVersion < 2 || snapshot.schemaVersion > 6)
             return invalid<std::string>("unsupported inventory schema");
         if (snapshot.schemaVersion < 4 && !snapshot.retiredItemIds.empty())
             return invalid<std::string>("legacy inventory schema cannot encode retired IDs");
@@ -67,6 +67,8 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
             for (const auto& item : snapshot.items)
                 if (item.location.place == Place::Attachment)
                     return invalid<std::string>("legacy inventory schema cannot encode attachments");
+        if (snapshot.schemaVersion < 6 && !snapshot.completedMerges.empty())
+            return invalid<std::string>("legacy inventory schema cannot encode merge receipts");
         Json root = {{"format", "AliyatInventory"},
                      {"schemaVersion", snapshot.schemaVersion},
                      {"catalogVersion", snapshot.catalogVersion},
@@ -76,6 +78,8 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
                      {"crafts", Json::array()}};
         if (snapshot.schemaVersion >= 4)
             root["retiredItems"] = snapshot.retiredItemIds;
+        if (snapshot.schemaVersion >= 6)
+            root["merges"] = Json::array();
         for (const auto& value : snapshot.containers)
             root["containers"].push_back({{"id", value.id}, {"slots", value.slots}});
         for (const auto& value : snapshot.actors)
@@ -98,6 +102,14 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
                 {"place", static_cast<unsigned>(receipt.destination.place)},
                 {"owner", receipt.destination.ownerId},
                 {"slot", receipt.destination.slot}});
+        if (snapshot.schemaVersion >= 6)
+            for (const auto& [request, receipt] : snapshot.completedMerges)
+                root["merges"].push_back({{"request", request},
+                    {"source", receipt.sourceItemId},
+                    {"target", receipt.targetItemId},
+                    {"quantity", receipt.quantity},
+                    {"sourceAfter", receipt.sourceAfter},
+                    {"targetAfter", receipt.targetAfter}});
         return root.dump();
     } catch (const std::exception& ex) {
         return invalid<std::string>(ex.what());
@@ -114,6 +126,7 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
         std::string format;
         if (!text(root, "format", format) || format != "AliyatInventory"
             || !u32(root, "schemaVersion", snapshot.schemaVersion)
+            || snapshot.schemaVersion < 2 || snapshot.schemaVersion > 6
             || !u32(root, "catalogVersion", snapshot.catalogVersion)
             || !u64(root, "nextAbilityBindingId", snapshot.nextAbilityBindingId))
             return invalid<Snapshot>("invalid inventory header");
@@ -129,6 +142,10 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
                  || !root.at("retiredItems").is_array()))
             || (snapshot.schemaVersion < 4 && root.contains("retiredItems")))
             return invalid<Snapshot>("invalid retired items array");
+        if ((snapshot.schemaVersion >= 6
+             && (!root.contains("merges") || !root.at("merges").is_array()))
+            || (snapshot.schemaVersion < 6 && root.contains("merges")))
+            return invalid<Snapshot>("invalid merges array");
         if (snapshot.schemaVersion >= 4) {
             for (const auto& value : root["retiredItems"]) {
                 if (!value.is_string())
@@ -200,6 +217,24 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
                                                    std::move(receipt)).second)
                 return invalid<Snapshot>("duplicate craft receipt");
         }
+        if (snapshot.schemaVersion >= 6)
+            for (const auto& value : root["merges"]) {
+                std::string request;
+                MergeReceipt receipt;
+                if (!text(value, "request", request)
+                    || !text(value, "source", receipt.sourceItemId)
+                    || !text(value, "target", receipt.targetItemId)
+                    || !u32(value, "quantity", receipt.quantity)
+                    || !u32(value, "sourceAfter", receipt.sourceAfter)
+                    || !u32(value, "targetAfter", receipt.targetAfter)
+                    || request.empty() || receipt.sourceItemId.empty()
+                    || receipt.targetItemId.empty()
+                    || receipt.sourceItemId == receipt.targetItemId
+                    || receipt.quantity == 0
+                    || receipt.targetAfter < receipt.quantity
+                    || !snapshot.completedMerges.emplace(request, receipt).second)
+                    return invalid<Snapshot>("invalid merge receipt");
+            }
         return snapshot;
     } catch (const std::exception& ex) {
         return invalid<Snapshot>(ex.what());

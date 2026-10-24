@@ -99,10 +99,22 @@ struct CraftReceipt {
     bool operator==(const CraftReceipt&) const = default;
 };
 
+/// A completed stack merge and its immediate post-merge quantities. Exact
+/// retries succeed only while those quantities still describe the same
+/// items; mismatching later quantities make the old request stale.
+struct MergeReceipt {
+    std::string sourceItemId;
+    std::string targetItemId;
+    std::uint32_t quantity = 0;
+    std::uint32_t sourceAfter = 0;
+    std::uint32_t targetAfter = 0;
+    bool operator==(const MergeReceipt&) const = default;
+};
+
 /// Versioned value snapshot. Restore validates every item, its sole owner and
 /// retired-ID disjointness before swapping; invalid saves leave Store intact.
 struct Snapshot {
-    std::uint32_t schemaVersion = 5;
+    std::uint32_t schemaVersion = 6;
     std::uint32_t catalogVersion = 0;
     std::uint64_t nextAbilityBindingId = 1;
     std::vector<Container> containers;
@@ -113,6 +125,7 @@ struct Snapshot {
     std::set<std::string> retiredItemIds;
     std::map<std::string, std::string> completedTransfers;
     std::map<std::string, CraftReceipt> completedCrafts;
+    std::map<std::string, MergeReceipt> completedMerges;
 };
 
 /// Single-owner inventory state. Do not retain Item references across writes.
@@ -129,7 +142,7 @@ public:
     Result<void> addContainer(Container container);
     Result<void> addEquipmentOwner(EquipmentOwner actor);
     /// Creates a fresh instance; an ID retired by destruction, full merge or
-    /// crafting may not be reused, including after a v5 snapshot restore.
+    /// crafting may not be reused, including after a v6 snapshot restore.
     Result<void> createItem(Item item);
 
     /// Transfer one entire instance. expectedSource prevents stale repeats;
@@ -140,9 +153,14 @@ public:
     Result<void> split(std::string_view itemId, std::uint32_t quantity,
                        std::string newItemId, Location destination);
     /// Merge same-definition stacks; source identity retires on full merge
-    /// and remains unavailable after a v5 snapshot restore.
+    /// and remains unavailable after a v6 snapshot restore.
     Result<void> merge(std::string_view sourceId, std::string_view targetId,
                        std::uint32_t quantity);
+    /// Replay-safe partial or full merge. The stable request ID and resulting
+    /// quantities survive snapshot/restore. Exact retries do not merge twice;
+    /// retries with mismatching later quantities report Stale instead of replaying.
+    Result<void> mergeOnce(std::string_view sourceId, std::string_view targetId,
+                           std::uint32_t quantity, std::string requestId);
     /// Explicit removal retires the instance ID. A container or actor with
     /// owned items cannot be unregistered until the game transfers/disposes
     /// those items first.
@@ -216,6 +234,7 @@ private:
     std::map<std::string, Reservation> _reservations;
     std::map<std::string, std::uint32_t> _reservedByItem;
     std::map<std::string, CraftReceipt> _completedCrafts;
+    std::map<std::string, MergeReceipt> _completedMerges;
     [[nodiscard]] bool isReserved(std::string_view itemId) const;
 };
 

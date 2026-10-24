@@ -276,6 +276,40 @@ Result<void> Store::merge(std::string_view sourceId, std::string_view targetId,
     return {};
 }
 
+Result<void> Store::mergeOnce(std::string_view sourceId, std::string_view targetId,
+                              std::uint32_t quantity, std::string requestId)
+{
+    if (requestId.empty())
+        return reject<void>(Error::Invalid, "merge needs a request ID");
+    if (const auto done = _completedMerges.find(requestId);
+        done != _completedMerges.end()) {
+        const auto& receipt = done->second;
+        if (receipt.sourceItemId != sourceId || receipt.targetItemId != targetId
+            || receipt.quantity != quantity)
+            return reject<void>(Error::Duplicate, "request ID reused for another merge");
+        const auto source = _items.find(receipt.sourceItemId);
+        const auto target = _items.find(receipt.targetItemId);
+        const bool sourceMatches = receipt.sourceAfter == 0
+            ? source == _items.end() && _retiredItemIds.contains(receipt.sourceItemId)
+            : source != _items.end() && source->second.quantity == receipt.sourceAfter;
+        if (sourceMatches && target != _items.end()
+            && target->second.quantity == receipt.targetAfter)
+            return {};
+        return reject<void>(Error::Stale, "merge was superseded after receipt");
+    }
+    Store candidate = *this;
+    if (auto result = candidate.merge(sourceId, targetId, quantity); !result)
+        return result;
+    const auto source = candidate._items.find(std::string(sourceId));
+    const auto target = candidate._items.find(std::string(targetId));
+    MergeReceipt receipt{std::string(sourceId), std::string(targetId), quantity,
+        source == candidate._items.end() ? 0u : source->second.quantity,
+        target->second.quantity};
+    candidate._completedMerges.emplace(std::move(requestId), std::move(receipt));
+    swap(candidate);
+    return {};
+}
+
 Result<void> Store::destroyItem(std::string_view itemId)
 {
     if (isReserved(itemId))
@@ -462,6 +496,7 @@ void Store::swap(Store& other) noexcept
     _retiredItemIds.swap(other._retiredItemIds);
     _completedTransfers.swap(other._completedTransfers);
     _completedCrafts.swap(other._completedCrafts);
+    _completedMerges.swap(other._completedMerges);
     _reservations.swap(other._reservations);
     _reservedByItem.swap(other._reservedByItem);
 }
@@ -477,19 +512,23 @@ Snapshot Store::snapshot() const
     result.retiredItemIds = _retiredItemIds;
     result.completedTransfers = _completedTransfers;
     result.completedCrafts = _completedCrafts;
+    result.completedMerges = _completedMerges;
     return result;
 }
 
 Result<void> Store::restore(const Snapshot& saved)
 {
     if ((saved.schemaVersion != 2 && saved.schemaVersion != 3
-         && saved.schemaVersion != 4 && saved.schemaVersion != 5)
+         && saved.schemaVersion != 4 && saved.schemaVersion != 5
+         && saved.schemaVersion != 6)
         || saved.catalogVersion != _catalogVersion)
         return reject<void>(Error::ContentVersion, "inventory snapshot version mismatch");
     if (saved.schemaVersion == 2 && !saved.completedCrafts.empty())
         return reject<void>(Error::Invalid, "v2 snapshot cannot contain craft receipts");
     if (saved.schemaVersion < 4 && !saved.retiredItemIds.empty())
         return reject<void>(Error::Invalid, "legacy snapshot cannot contain retired IDs");
+    if (saved.schemaVersion < 6 && !saved.completedMerges.empty())
+        return reject<void>(Error::Invalid, "legacy snapshot cannot contain merge receipts");
     Store next(_catalogVersion);
     next._definitions = _definitions;
     for (const auto& container : saved.containers)
@@ -540,6 +579,14 @@ Result<void> Store::restore(const Snapshot& saved)
             return reject<void>(Error::Invalid, "invalid craft receipt");
     }
     next._completedCrafts = saved.completedCrafts;
+    for (const auto& [request, receipt] : saved.completedMerges) {
+        if (request.empty() || receipt.sourceItemId.empty()
+            || receipt.targetItemId.empty()
+            || receipt.sourceItemId == receipt.targetItemId
+            || receipt.quantity == 0 || receipt.targetAfter < receipt.quantity)
+            return reject<void>(Error::Invalid, "invalid merge receipt");
+    }
+    next._completedMerges = saved.completedMerges;
     next._nextAbilityBindingId = saved.nextAbilityBindingId;
     _containers.swap(next._containers);
     _actors.swap(next._actors);
@@ -547,6 +594,7 @@ Result<void> Store::restore(const Snapshot& saved)
     _retiredItemIds.swap(next._retiredItemIds);
     _completedTransfers.swap(next._completedTransfers);
     _completedCrafts.swap(next._completedCrafts);
+    _completedMerges.swap(next._completedMerges);
     _reservations.clear();
     _reservedByItem.clear();
     _nextAbilityBindingId = next._nextAbilityBindingId;

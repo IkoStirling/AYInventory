@@ -331,7 +331,7 @@ void craftReservations()
     check(!store.commitCraft("craft-1", "another", output),
           "request reuse rejects different output");
     auto saved = store.snapshot();
-    check(saved.completedCrafts.size() == 1 && saved.schemaVersion == 5,
+    check(saved.completedCrafts.size() == 1 && saved.schemaVersion == 6,
           "craft receipt saved");
     auto loaded = makeStore();
     check(loaded.restore(saved).has_value(), "restore crafted inventory");

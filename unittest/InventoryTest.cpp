@@ -99,7 +99,7 @@ void restoreAndCorruption()
     check(store.createItem({"sword", "iron-sword", 1, drop}).has_value(), "item");
     check(store.transfer("sword", drop, chestA, "pickup").has_value(), "transfer");
     auto saved = store.snapshot();
-    check(saved.schemaVersion == 5 && saved.nextAbilityBindingId == 2,
+    check(saved.schemaVersion == 6 && saved.nextAbilityBindingId == 2,
           "Ability binding allocator persisted");
     auto restored = makeStore();
     check(restored.restore(saved).has_value(), "snapshot restore");
@@ -230,6 +230,68 @@ void fullMergeRetiresSourceIdentity()
           "merged instance ID cannot be reused");
 }
 
+void replaySafeStackMerges()
+{
+    auto store = makeStore();
+    const Location first{Place::Container, "chest", "a"};
+    const Location second{Place::Container, "chest", "b"};
+    check(store.createItem({"source", "potion", 6, first}).has_value(), "merge source");
+    check(store.createItem({"target", "potion", 2, second}).has_value(), "merge target");
+    check(store.mergeOnce("source", "target", 2, "merge-1").has_value(),
+          "first partial merge");
+    check(store.findItem("source")->quantity == 4
+          && store.findItem("target")->quantity == 4, "partial merge quantities");
+    check(store.mergeOnce("source", "target", 2, "merge-1").has_value(),
+          "exact partial merge retry");
+    check(store.findItem("source")->quantity == 4
+          && store.findItem("target")->quantity == 4, "retry did not merge again");
+    check(!store.mergeOnce("source", "target", 1, "merge-1"),
+          "conflicting request reuse rejected");
+
+    const auto saved = store.snapshot();
+    check(saved.schemaVersion == 6 && saved.completedMerges.size() == 1,
+          "merge receipt saved");
+    auto loaded = makeStore();
+    check(loaded.restore(saved).has_value(), "merge receipt restored");
+    check(loaded.mergeOnce("source", "target", 2, "merge-1").has_value(),
+          "retry after load does not merge again");
+    check(loaded.findItem("source")->quantity == 4
+          && loaded.findItem("target")->quantity == 4, "loaded quantities unchanged");
+    check(loaded.merge("source", "target", 1).has_value(), "later merge");
+    check(!loaded.mergeOnce("source", "target", 2, "merge-1"),
+          "old retry is stale after quantities change");
+    check(loaded.findItem("source")->quantity == 3
+          && loaded.findItem("target")->quantity == 5, "stale retry changed nothing");
+
+    auto corrupt = saved;
+    corrupt.completedMerges.at("merge-1").quantity = 0;
+    check(!loaded.restore(corrupt), "invalid merge receipt rejected");
+    check(loaded.findItem("source")->quantity == 3, "bad restore leaves store intact");
+    corrupt = saved;
+    corrupt.schemaVersion = 5;
+    check(!loaded.restore(corrupt), "legacy snapshot cannot carry merge receipt");
+#ifdef AY_INVENTORY_JSON
+    auto json = encodeSnapshotJson(saved);
+    check(json.has_value(), "merge receipt JSON encode");
+    auto decoded = decodeSnapshotJson(*json);
+    check(decoded.has_value() && decoded->completedMerges == saved.completedMerges,
+          "merge receipt JSON roundtrip");
+    check(loaded.restore(*decoded).has_value(), "merge receipt JSON restore");
+    check(loaded.mergeOnce("source", "target", 2, "merge-1").has_value(),
+          "JSON restored retry is idempotent");
+#endif
+
+    auto full = makeStore();
+    check(full.createItem({"small", "potion", 2, first}).has_value(), "full source");
+    check(full.createItem({"large", "potion", 6, second}).has_value(), "full target");
+    check(full.mergeOnce("small", "large", 2, "merge-full").has_value(),
+          "full merge");
+    check(full.findItem("small") == nullptr && full.snapshot().retiredItemIds.contains("small"),
+          "full merge retires source");
+    check(full.mergeOnce("small", "large", 2, "merge-full").has_value(),
+          "full merge retry succeeds without source");
+}
+
 void attachedPartsFollowEquipmentAndRestore()
 {
     Definition frame;
@@ -313,6 +375,7 @@ int main()
         abilityBindingSurvivesSplit();
         retiredInstanceIdsCannotImpersonateOldTransfers();
         fullMergeRetiresSourceIdentity();
+        replaySafeStackMerges();
         attachedPartsFollowEquipmentAndRestore();
         std::cout << "AYInventory: all ownership tests passed\n";
         return 0;
