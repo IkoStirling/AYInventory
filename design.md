@@ -66,6 +66,11 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   并暂存对象，`publish` 必须全成或全不成；失败后 `abort` 清理暂存，Store 无变化。
   发布成功后 Store 通过无分配交换写入世界归属。重复请求由 Host 验证已发布对象及
   姿态，不能再次发布。Host 应用相同稳定 ID 重建读档后的实体。
+- `craftAndPlaceWorldItem` 将预留、扣料、输出实例创建与世界放置放在一份候选
+  Store 中。Host `prepare/publish` 失败时丢弃候选，活动材料/预留/收据不变；
+  成功后才交换。原制作请求 ID 是完整交易的持久重试键，重试核验输出身份及
+  已发布对象。Host 仍须保证发布失败不留下部分世界对象；跨进程崩溃的读档
+  一致性仍依赖游戏在暂停模拟边界把 World 账本与 Store 写入同一 SaveGame payload。
 - `ScenePhysicsHost3D` 接受当前 Scene 的 `World&`、`IPhysicsQuery&`、`Store&`，
   以及游戏拥有的当前视线和权限回调。焦点和激活各自发起当前 raycast，按有效 3D
   刚体句柄解析 Entity，再用 `persistentId` 对应 Store 的世界物品或容器。

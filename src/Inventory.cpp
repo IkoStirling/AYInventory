@@ -438,6 +438,12 @@ const Item* Store::findItem(std::string_view id) const
     return found == _items.end() ? nullptr : &found->second;
 }
 
+const CraftReceipt* Store::findCraftReceipt(std::string_view requestId) const
+{
+    const auto found = _completedCrafts.find(std::string(requestId));
+    return found == _completedCrafts.end() ? nullptr : &found->second;
+}
+
 const Definition* Store::findDefinition(std::string_view id) const
 {
     const auto found = _definitions.find(std::string(id));

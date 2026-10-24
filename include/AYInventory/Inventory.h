@@ -164,6 +164,8 @@ public:
     [[nodiscard]] bool hasContainer(std::string_view id) const;
 
     [[nodiscard]] const Item* findItem(std::string_view id) const;
+    /// Durable completion receipt; pointer expires on Store mutation.
+    [[nodiscard]] const CraftReceipt* findCraftReceipt(std::string_view requestId) const;
     [[nodiscard]] const Definition* findDefinition(std::string_view id) const;
     [[nodiscard]] std::optional<std::string> occupying(const Location& location) const;
     [[nodiscard]] Snapshot snapshot() const;

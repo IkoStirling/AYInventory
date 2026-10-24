@@ -370,6 +370,46 @@ void interactionAndPlacement()
                           request, "place-1"),
           "superseded placement receipt cannot republish object");
 }
+
+void directCraftPlacementIsOneRecoverableHandoff()
+{
+    auto store = makeStore();
+    PlacementHost host;
+    const PlacementRequest request{"world/campfire-1", {}};
+    host.clear = false;
+    check(!craftAndPlaceWorldItem(store, host, campfire(), "bag", "build-1",
+                                  "campfire-1", request), "blocked craft placement");
+    check(host.published == 0 && host.aborted == 1
+          && store.findCraftReceipt("build-1") == nullptr
+          && store.findItem("campfire-1") == nullptr
+          && store.findItem("wood-1")->quantity == 5,
+          "blocked space retains materials and no receipt");
+    host.clear = true;
+    host.throwPublish = true;
+    check(!craftAndPlaceWorldItem(store, host, campfire(), "bag", "build-1",
+                                  "campfire-1", request), "throwing publication");
+    check(host.aborted == 2 && store.findCraftReceipt("build-1") == nullptr,
+          "publication failure keeps original Store");
+    host.throwPublish = false;
+    check(craftAndPlaceWorldItem(store, host, campfire(), "bag", "build-1",
+                                 "campfire-1", request), "craft directly into world");
+    check(host.published == 1 && store.findItem("wood-1")->quantity == 2
+          && store.findItem("iron-1")->quantity == 1
+          && store.findItem("campfire-1")->location
+             == Location{Place::World, request.worldObjectId, {}},
+          "materials and object published together");
+    check(craftAndPlaceWorldItem(store, host, campfire(), "bag", "build-1",
+                                 "campfire-1", request), "exact build retry");
+    check(host.published == 1, "retry does not publish again");
+    check(!craftAndPlaceWorldItem(store, host, campfire(), "bag", "build-1",
+                                  "another", request), "changed output conflicts");
+    auto loaded = makeStore();
+    check(loaded.restore(store.snapshot()), "restore built item and receipt");
+    check(craftAndPlaceWorldItem(loaded, host, campfire(), "bag", "build-1",
+                                 "campfire-1", request), "retry after load");
+    check(host.published == 1 && loaded.findItem("wood-1")->quantity == 2,
+          "restored retry spends nothing");
+}
 } // namespace
 
 int main()
@@ -380,6 +420,7 @@ int main()
         craftAcrossStacks();
         concurrentReservations();
         interactionAndPlacement();
+        directCraftPlacementIsOneRecoverableHandoff();
         throwingHostsDoNotPublishHalfTransactions();
         std::cout << "AYInventory: world transactions passed\n";
     } catch (const std::exception& error) {

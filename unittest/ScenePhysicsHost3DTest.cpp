@@ -15,6 +15,7 @@ namespace {
 constexpr const char* dropId = "11111111111111111111111111111111";
 constexpr const char* placedId = "22222222222222222222222222222222";
 constexpr const char* blockerId = "33333333333333333333333333333333";
+constexpr const char* craftedId = "44444444444444444444444444444444";
 
 void check(bool value, const char* label)
 {
@@ -68,7 +69,7 @@ void run()
 {
     WorldScope scope;
     auto& world = scope.world;
-    auto created = Store::create(1, {{"wood", 1}});
+    auto created = Store::create(1, {{"wood", 1}, {"campfire", 1}});
     check(created.has_value(), "store catalog");
     auto store = std::move(*created);
     check(store.addContainer({"bag", {"slot"}}).has_value(), "bag");
@@ -160,6 +161,19 @@ void run()
           "failed publish left other entity intact");
     check(world.findEntityByPersistentId(placedId) == placed,
           "failed publish left prior published item intact");
+    check(store.createItem({"wood-2", "wood", 1, bag}), "new material stack");
+    const Recipe recipe{"campfire-v1", {{"wood", 1}}, "campfire", 1};
+    PlacementRequest crafted{craftedId, {}};
+    crafted.pose.position = {5.0, 0.0, 0.0};
+    check(craftAndPlaceWorldItem(store, host, recipe, "bag", "build-1",
+                                 "campfire-1", crafted), "craft and publish through real Scene host");
+    check(world.findEntityByPersistentId(craftedId) != nullptr
+          && store.findItem("wood-2") == nullptr
+          && store.findItem("campfire-1")->location
+             == Location{Place::World, craftedId, {}},
+          "crafted object and consumed material agree");
+    check(craftAndPlaceWorldItem(store, host, recipe, "bag", "build-1",
+                                 "campfire-1", crafted), "real host retry verifies published object");
     check(query.rayCalls >= 3 && query.overlapCalls >= 2, "live queries used");
 }
 } // namespace

@@ -142,4 +142,47 @@ Result<void> placeWorldItem(Store& store, IPlacementHost& host,
     return {};
 }
 
+Result<void> craftAndPlaceWorldItem(Store& store, IPlacementHost& host,
+                                    const Recipe& recipe,
+                                    std::string_view sourceContainerId,
+                                    std::string craftRequestId,
+                                    std::string outputItemId,
+                                    PlacementRequest request)
+{
+    if (craftRequestId.empty() || outputItemId.empty()
+        || request.worldObjectId.empty() || !validPose(request.pose))
+        return reject<void>(Error::Invalid, "invalid craft placement identity or pose");
+    const Location destination{Place::World, request.worldObjectId, {}};
+    if (const auto* receipt = store.findCraftReceipt(craftRequestId)) {
+        if (*receipt != CraftReceipt{outputItemId, destination})
+            return reject<void>(Error::Duplicate, "craft placement retry changed output");
+        const auto* existing = store.findItem(outputItemId);
+        if (!existing || existing->location != destination)
+            return reject<void>(Error::Stale, "crafted world item has moved or vanished");
+        return invokeHost([&] { return host.verifyPublished(request, *existing); },
+                          "Crafted object verification");
+    }
+
+    Store staged = store;
+    if (auto reserved = staged.reserveCraft(recipe, sourceContainerId,
+                                            craftRequestId); !reserved)
+        return reserved;
+    if (auto crafted = staged.commitCraft(craftRequestId, outputItemId,
+                                          destination); !crafted)
+        return crafted;
+    const auto* item = staged.findItem(outputItemId);
+    if (auto prepared = invokeHost([&] { return host.prepare(request, *item); },
+                                   "Craft placement preparation"); !prepared) {
+        host.abort();
+        return prepared;
+    }
+    if (auto published = invokeHost([&] { return host.publish(); },
+                                    "Craft placement publication"); !published) {
+        host.abort();
+        return published;
+    }
+    store.swap(staged);
+    return {};
+}
+
 } // namespace ayt::inventory

@@ -57,6 +57,9 @@ ctest --test-dir out/build/ayinventory --output-on-failure
 `commitCraft` 一次性扣料并产生一个有稳定 ID 的输出实例，失败保持材料与预留；
 `cancelCraft` 释放预留。保存时待提交预留不入快照，材料仍在原槽；读档相当于取消。
 快照 schema v5 记录制作收据、退役实例 ID 和配件归属，可读取 v2/v3/v4 所有权存档。
+需要直接建造时，`craftAndPlaceWorldItem` 在 Store 候选中预留并扣料，先让
+`IPlacementHost` 发布世界对象，再无分配交换候选 Store；空间检查或发布失败
+不会消耗材料。完成收据和世界物品 ID 同时持久化，重复调用只核验已发布对象。
 
 `WorldTransactions.h` 接收 Host 从 3D 射线/空间查询映射出的稳定对象 ID。
 `chooseFocus` 选最近候选，`activate` 在操作当下重验有效性与权限，完成拾取或返回可打开的容器 ID。
@@ -68,7 +71,7 @@ Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 A
 独立 Core 构建仍无需 Scene/Physics。
 
 示例：`AYInventoryPickupExample` 演示世界掉落→背包→装备；
-`AYInventoryCraftPlaceExample` 演示制作→世界放置。详细失败语义见 [design.md](design.md)。
+`AYInventoryCraftPlaceExample` 演示拾取→直接制作并放置→重复请求。详细失败语义见 [design.md](design.md)。
 实际 Host 映射顺序见 [world-host-integration.md](docs/world-host-integration.md)。
 `AYInventorySceneRestoreTest` 在支持 Scene/Physics/SaveGame 的构建中验证作者掉落
 拾取后的墓碑恢复、背包所有权、重新放置与再次读档。交互/放置 Host 抛异常时返回

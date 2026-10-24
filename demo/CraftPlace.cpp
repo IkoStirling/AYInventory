@@ -58,8 +58,7 @@ int main()
     if (!built) return 1;
     auto store = std::move(*built);
     const Location bagWood{Place::Container, "player-bag", "wood"};
-    const Location bagOutput{Place::Container, "player-bag", "crafted"};
-    if (!store.addContainer({"player-bag", {"wood", "crafted"}})
+    if (!store.addContainer({"player-bag", {"wood"}})
         || !store.createItem({"wood-1", "wood", 4,
                               {Place::World, "home/drop-wood", {}}})) return 1;
     World world;
@@ -69,12 +68,12 @@ int main()
     if (!focus || !activate(store, world, *focus, "player", bagWood, "pickup-1"))
         return 1;
     const Recipe recipe{"simple-campfire", {{"wood", 3}}, "campfire", 1};
-    if (!store.reserveCraft(recipe, "player-bag", "craft-1")
-        || !store.commitCraft("craft-1", "campfire-1", bagOutput)) return 1;
     PlacementRequest placement{"home/campfire-1", {}};
     placement.pose.position = {2.0, 0.0, 3.0};
-    if (!placeWorldItem(store, world, "campfire-1", bagOutput,
-                        placement, "place-1")) return 1;
+    if (!craftAndPlaceWorldItem(store, world, recipe, "player-bag",
+                                "build-1", "campfire-1", placement)
+        || !craftAndPlaceWorldItem(store, world, recipe, "player-bag",
+                                   "build-1", "campfire-1", placement)) return 1;
     const auto snapshot = store.snapshot();
     std::cout << snapshot.items.size() << " items; "
               << store.findItem("campfire-1")->location.ownerId

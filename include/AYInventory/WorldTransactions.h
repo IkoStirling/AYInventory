@@ -90,4 +90,16 @@ Result<void> placeWorldItem(Store& store, IPlacementHost& host,
                             std::string_view itemId, const Location& source,
                             PlacementRequest request, std::string requestId);
 
+/// Reserve materials, commit output directly to one stable World identity,
+/// and publish its object as a single Store/World handoff. Failure leaves the
+/// Store and its prior reservations unchanged; Host publication must be
+/// failure-atomic. The craft request ID is the durable retry key. An exact
+/// retry verifies the existing world object instead of spending again.
+Result<void> craftAndPlaceWorldItem(Store& store, IPlacementHost& host,
+                                    const Recipe& recipe,
+                                    std::string_view sourceContainerId,
+                                    std::string craftRequestId,
+                                    std::string outputItemId,
+                                    PlacementRequest request);
+
 } // namespace ayt::inventory
