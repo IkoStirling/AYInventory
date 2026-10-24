@@ -34,6 +34,8 @@ struct Query final : physics::IPhysicsQuery {
     bool overlapFails = false;
     physics::RaycastHit current{};
     std::vector<physics::BodyHandle> occupied;
+    math::FVector3 boxExtents{};
+    math::FQuaternion boxRotation{};
     int rayCalls = 0;
     int overlapCalls = 0;
 
@@ -50,6 +52,17 @@ struct Query final : physics::IPhysicsQuery {
                                            physics::PhysLayerMask) override
     {
         ++overlapCalls;
+        out = overlapFails ? std::vector<physics::BodyHandle>{} : occupied;
+        return overlapFails ? physics::PhysResult::BackendError : physics::PhysResult::Ok;
+    }
+    physics::PhysResult overlapBoxSync(const math::FVector3&,
+        const math::FVector3& extents, const math::FQuaternion& rotation,
+        std::vector<physics::BodyHandle>& out,
+        physics::PhysLayerMask) override
+    {
+        ++overlapCalls;
+        boxExtents = extents;
+        boxRotation = rotation;
         out = overlapFails ? std::vector<physics::BodyHandle>{} : occupied;
         return overlapFails ? physics::PhysResult::BackendError : physics::PhysResult::Ok;
     }
@@ -121,12 +134,17 @@ void run()
     const Location bag{Place::Container, "bag", "slot"};
     PlacementRequest request{placedId, {}};
     request.pose.position = {2.0, 0.0, 0.0};
+    request.pose.halfExtents = {2.0, 0.2, 0.2};
+    request.pose.rotation = {0.0, 0.0, 0.70710678, 0.70710678};
     query.occupied = {77};
     check(!placeWorldItem(store, host, "wood-1", bag, request, "place-1"),
           "occupied footprint rejected");
     check(store.findItem("wood-1")->location == bag
           && world.findEntityByPersistentId(placedId) == nullptr,
           "occupied failure left no object");
+    check(query.boxExtents.x == 2.0f && query.boxExtents.y > 0.19f
+          && query.boxRotation.z > 0.7f,
+          "placement passed oriented box instead of enclosing sphere");
     query.occupied.clear();
     check(placeWorldItem(store, host, "wood-1", bag, request, "place-1"),
           "placed item with real spatial entity");

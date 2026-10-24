@@ -109,6 +109,14 @@ struct Query final : ayt::physics::IPhysicsQuery {
         out.clear();
         return ayt::physics::PhysResult::Ok;
     }
+    ayt::physics::PhysResult overlapBoxSync(const ayt::math::FVector3&,
+        const ayt::math::FVector3&, const ayt::math::FQuaternion&,
+        std::vector<ayt::physics::BodyHandle>& out,
+        ayt::physics::PhysLayerMask) override
+    {
+        out.clear();
+        return ayt::physics::PhysResult::Ok;
+    }
 };
 
 ScenePhysicsHost3D makeHost(ayt::scene::Scene& scene, Query& query, Store& store)

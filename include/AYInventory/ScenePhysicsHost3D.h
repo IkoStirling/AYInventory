@@ -41,8 +41,8 @@ public:
                            std::string_view actorId) override;
     Result<void> consumeWorldPickup(const InteractionCandidate& candidate) override;
 
-    /// A bounding sphere conservatively tests the authored box footprint.
-    /// Layers and finer shape/permission policy remain game supplied.
+    /// The current 3D oriented box query tests the authored footprint at
+    /// prepare and publish. Layers and permission policy remain game supplied.
     void setPlacementLayerMask(physics::PhysLayerMask mask) noexcept {
         _placementLayerMask = mask;
     }

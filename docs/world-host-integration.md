@@ -34,9 +34,9 @@ restore the tombstone and Store participant into a disposable Scene, then
 activate it. The Scene restore test also saves a placed runtime Entity with
 its Store world owner ID and checks both after a second load.
 
-The current public physics query facade has ray and sphere overlap queries.
-Sphere overlap is conservative for oriented boxes or irregular footprints.
-The Host may use a more exact project-specific spatial query where required.
+The current public physics query facade has ray, sphere-overlap and oriented
+box-overlap queries. A game can supply its own placement Host for irregular
+footprints or terrain and construction rules.
 For ordinary 3D Entity scenes, link `AYInventory::World3DHost` and construct
 `ScenePhysicsHost3D(scene.world(), *engineHost.physicsQuery(), store, view,
 permission)` after registering Entity physics components. The view callback
@@ -45,5 +45,5 @@ callback owns game rules. World object IDs used by this concrete adapter are
 canonical 32-digit lowercase hexadecimal Entity persistent IDs. Published
 objects carry a static 3D rigid-body and box collider description; run the
 normal EntityPhysicsBridge pre-physics sync to make them physically queryable.
-The bounding-sphere occupancy check is conservative, so a game needing exact
-rotated-box placement can provide its own `IPlacementHost`.
+The adapter checks its authored rotated box at prepare and publish using the
+current Jolt overlap query. Backends without that query fail placement safely.

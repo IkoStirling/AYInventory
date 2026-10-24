@@ -74,7 +74,7 @@ ctest --test-dir out/build/ayinventory --output-on-failure
 Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 AYScene Entity 与 AYPhysics 查询
 可选用 `AYInventory::World3DHost` 的 `ScenePhysicsHost3D` 连接。游戏注入当前
 `Scene::world()`、`IPhysicsQuery`、视线与权限回调；新放置对象的 ID 必须是 Entity
-支持的 32 位小写十六进制持久 ID。该适配以射线重验拾取，并用保守球体重叠检查放置空间。
+支持的 32 位小写十六进制持久 ID。该适配以射线重验拾取，并用当前旋转盒重叠检查放置空间。
 独立 Core 构建仍无需 Scene/Physics。
 
 示例：`AYInventoryPickupExample` 演示世界掉落→背包→装备；

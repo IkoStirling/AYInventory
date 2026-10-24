@@ -26,6 +26,20 @@ bool validEntityId(const std::string& id) noexcept
     return entity::isValidComponentInstanceId(id);
 }
 
+physics::PhysResult overlapPlacement(physics::IPhysicsQuery& query,
+    const PlacementPose& pose, physics::PhysLayerMask layerMask,
+    std::vector<physics::BodyHandle>& overlaps)
+{
+    return query.overlapBoxSync(
+        {static_cast<float>(pose.position[0]), static_cast<float>(pose.position[1]),
+         static_cast<float>(pose.position[2])},
+        {static_cast<float>(pose.halfExtents[0]), static_cast<float>(pose.halfExtents[1]),
+         static_cast<float>(pose.halfExtents[2])},
+        {static_cast<float>(pose.rotation[0]), static_cast<float>(pose.rotation[1]),
+         static_cast<float>(pose.rotation[2]), static_cast<float>(pose.rotation[3])},
+        overlaps, layerMask);
+}
+
 bool samePose(const PlacementPose& pose, const entity::Entity& entity)
 {
     math::FVector3 position;
@@ -178,22 +192,13 @@ Result<void> ScenePhysicsHost3D::prepare(const PlacementRequest& request,
         return fail<void>(Error::Invalid, "placement position is not representable");
     for (double value : request.pose.rotation) if (!finiteFloat(value))
         return fail<void>(Error::Invalid, "placement rotation is not representable");
-    double radiusSquared = 0.0;
     for (double value : request.pose.halfExtents) {
         if (!finiteFloat(value) || value <= 0.0)
             return fail<void>(Error::Invalid, "placement extent is not representable");
-        radiusSquared += value * value;
     }
-    const double radius = std::sqrt(radiusSquared);
-    if (!finiteFloat(radius))
-        return fail<void>(Error::Invalid, "placement footprint too large");
     std::vector<physics::BodyHandle> overlaps;
-    const math::FVector3 center{
-        static_cast<float>(request.pose.position[0]),
-        static_cast<float>(request.pose.position[1]),
-        static_cast<float>(request.pose.position[2])};
-    if (_query.overlapSphereSync(center, static_cast<float>(radius), overlaps,
-                                 _placementLayerMask) != physics::PhysResult::Ok)
+    if (overlapPlacement(_query, request.pose, _placementLayerMask, overlaps)
+            != physics::PhysResult::Ok)
         return fail<void>(Error::Stale, "occupancy query failed");
     if (!overlaps.empty()) return fail<void>(Error::Occupied, "placement space occupied");
     _prepared = request;
@@ -210,15 +215,9 @@ Result<void> ScenePhysicsHost3D::publish()
             return fail<void>(Error::Stale, "world query not ready at publish");
         if (_world.findEntityByPersistentId(request.worldObjectId))
             return fail<void>(Error::Duplicate, "world object ID appeared before publish");
-        double radiusSquared = 0.0;
-        for (double value : request.pose.halfExtents) radiusSquared += value * value;
-        const math::FVector3 center{
-            static_cast<float>(request.pose.position[0]),
-            static_cast<float>(request.pose.position[1]),
-            static_cast<float>(request.pose.position[2])};
         std::vector<physics::BodyHandle> overlaps;
-        if (_query.overlapSphereSync(center, static_cast<float>(std::sqrt(radiusSquared)),
-                                     overlaps, _placementLayerMask) != physics::PhysResult::Ok)
+        if (overlapPlacement(_query, request.pose, _placementLayerMask, overlaps)
+                != physics::PhysResult::Ok)
             return fail<void>(Error::Stale, "occupancy query failed at publish");
         if (!overlaps.empty())
             return fail<void>(Error::Occupied, "placement space changed before publish");
