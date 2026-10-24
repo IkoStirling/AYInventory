@@ -22,7 +22,8 @@ struct InteractionView3D {
 /// The caller supplies the current actor view and game permission rule. World
 /// object IDs must be canonical 32-digit Entity persistent IDs. Keep the
 /// borrowed World, Store and query alive; use only on their owning Sim thread.
-class ScenePhysicsHost3D final : public IInteractionHost, public IPlacementHost {
+class ScenePhysicsHost3D final : public IInteractionHost,
+                                 public IDurablePlacementHost {
 public:
     using ViewProvider = std::function<Result<InteractionView3D>(std::string_view actorId)>;
     using Permission = std::function<Result<void>(const InteractionCandidate&,
@@ -52,6 +53,10 @@ public:
                          const Item& item) override;
     Result<void> publish() override;
     void abort() noexcept override;
+    void commitPublished() noexcept override;
+    /// Retract exactly the object this request just published. Call only
+    /// before any later World mutation at the same quiescent Sim boundary.
+    bool retractPublished(const PlacementRequest& request) noexcept override;
 
 private:
     entity::World& _world;
@@ -61,6 +66,7 @@ private:
     Permission _permission;
     physics::PhysLayerMask _placementLayerMask = 0xFFFFFFFFu;
     std::optional<PlacementRequest> _prepared;
+    std::string _retractableId;
 };
 
 } // namespace ayt::inventory

@@ -146,14 +146,26 @@ void run()
           && query.boxRotation.z > 0.7f,
           "placement passed oriented box instead of enclosing sphere");
     query.occupied.clear();
-    check(placeWorldItem(store, host, "wood-1", bag, request, "place-1"),
-          "placed item with real spatial entity");
+    check(!placeWorldItemDurable(store, host, "wood-1", bag, request,
+        "place-1", [](const Store&, const PlacementRequest&) { return false; }),
+        "failed save retracts real spatial entity");
+    check(world.findEntityByPersistentId(placedId) == nullptr
+          && store.findItem("wood-1")->location == bag,
+          "failed save leaves real World and Store at prior state");
+    check(placeWorldItemDurable(store, host, "wood-1", bag, request,
+        "place-1", [](const Store& candidate, const PlacementRequest& saved) {
+            return candidate.findItem("wood-1")->location
+                == Location{Place::World, saved.worldObjectId, {}};
+        }), "saved item with real spatial entity");
     auto* placed = world.findEntityByPersistentId(placedId);
     check(placed && placed->getComponent<entity::RigidBodyComponent>()->isStatic()
           && placed->getComponent<entity::ColliderComponent>()->shapes.size() == 1,
           "published object has stable ID and queryable physics authoring");
     check(store.findItem("wood-1")->location == Location{Place::World, placedId, {}},
           "published owner matches Entity ID");
+    check(!host.retractPublished(request)
+          && world.findEntityByPersistentId(placedId) == placed,
+          "committed placement cannot be retracted later");
     check(placeWorldItem(store, host, "wood-1", bag, request, "place-1"),
           "exact placement retry verifies Entity");
     request.pose.position[0] = 3.0;
@@ -183,8 +195,20 @@ void run()
     const Recipe recipe{"campfire-v1", {{"wood", 1}}, "campfire", 1};
     PlacementRequest crafted{craftedId, {}};
     crafted.pose.position = {5.0, 0.0, 0.0};
-    check(craftAndPlaceWorldItem(store, host, recipe, "bag", "build-1",
-                                 "campfire-1", crafted), "craft and publish through real Scene host");
+    check(!craftAndPlaceWorldItemDurable(store, host, recipe, "bag", "build-1",
+        "campfire-1", crafted,
+        [](const Store&, const PlacementRequest&) { return false; }),
+        "failed craft save retracts real spatial entity");
+    check(world.findEntityByPersistentId(craftedId) == nullptr
+          && store.findItem("wood-2") != nullptr
+          && store.findCraftReceipt("build-1") == nullptr,
+          "failed craft save leaves materials and World intact");
+    check(craftAndPlaceWorldItemDurable(store, host, recipe, "bag", "build-1",
+        "campfire-1", crafted,
+        [](const Store& candidate, const PlacementRequest& saved) {
+            return candidate.findItem("campfire-1")->location
+                == Location{Place::World, saved.worldObjectId, {}};
+        }), "craft and save through real Scene host");
     check(world.findEntityByPersistentId(craftedId) != nullptr
           && store.findItem("wood-2") == nullptr
           && store.findItem("campfire-1")->location

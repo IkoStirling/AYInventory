@@ -70,16 +70,18 @@ struct InteractionHost final : IInteractionHost {
     }
 };
 
-struct PlacementHost final : IPlacementHost {
+struct PlacementHost final : IDurablePlacementHost {
     bool clear = true;
     bool canPublish = true;
     bool samePose = true;
     bool throwPrepare = false;
     bool throwPublish = false;
     bool throwVerify = false;
+    bool canRetract = true;
     int prepared = 0;
     int published = 0;
     int aborted = 0;
+    int retracted = 0;
     Result<void> verifyPublished(const PlacementRequest&, const Item&) override
     {
         if (throwVerify) throw std::runtime_error("verify fault");
@@ -101,7 +103,89 @@ struct PlacementHost final : IPlacementHost {
         return {};
     }
     void abort() noexcept override { ++aborted; }
+    bool retractPublished(const PlacementRequest&) noexcept override {
+        ++retracted;
+        return canRetract;
+    }
 };
+
+void durablePlacementSavesCandidateOrRetractsWorld()
+{
+    auto store = makeStore();
+    PlacementHost host;
+    const Location bag{Place::Container, "bag", "a"};
+    const PlacementRequest request{"scene/durable-wood", {}};
+    int saveCalls = 0;
+    const PlacementSave rejected = [&](const Store& candidate,
+                                       const PlacementRequest& proposed) {
+        ++saveCalls;
+        check(proposed.worldObjectId == request.worldObjectId
+              && candidate.findItem("wood-1")->location
+                 == Location{Place::World, request.worldObjectId, {}}
+              && store.findItem("wood-1")->location == bag,
+              "save sees candidate while live Store remains old");
+        return false;
+    };
+    check(!placeWorldItemDurable(store, host, "wood-1", bag, request,
+                                 "durable-place", rejected),
+          "failed durable save rejects placement");
+    check(host.retracted == 1 && store.findItem("wood-1")->location == bag,
+          "failed save retracts world and retains inventory");
+    check(placeWorldItemDurable(store, host, "wood-1", bag, request,
+                                "durable-place", [&](const Store& candidate,
+                                    const PlacementRequest&) {
+                                    ++saveCalls;
+                                    return candidate.findItem("wood-1")->location.place
+                                        == Place::World;
+                                }), "save retry publishes ownership");
+    check(host.published == 2 && host.retracted == 1 && saveCalls == 2,
+          "retry publishes once after failed save");
+    check(placeWorldItemDurable(store, host, "wood-1", bag, request,
+                                "durable-place", rejected)
+          && saveCalls == 2, "exact retry does not save twice");
+
+    auto throwingStore = makeStore();
+    PlacementHost throwingHost;
+    check(!placeWorldItemDurable(throwingStore, throwingHost, "wood-1", bag,
+        request, "throw-save", [](const Store&, const PlacementRequest&) -> bool {
+            throw std::runtime_error("disk fault");
+        }) && throwingHost.retracted == 1
+          && throwingStore.findItem("wood-1")->location == bag,
+          "throwing save retracts publication and retains Store");
+    auto unretractableStore = makeStore();
+    PlacementHost unretractableHost;
+    unretractableHost.canRetract = false;
+    const auto rollbackFailure = placeWorldItemDurable(unretractableStore,
+        unretractableHost, "wood-1", bag, request, "bad-rollback",
+        [](const Store&, const PlacementRequest&) { return false; });
+    check(!rollbackFailure && rollbackFailure.error().code == Error::Stale
+          && unretractableHost.retracted == 1
+          && unretractableStore.findItem("wood-1")->location == bag,
+          "failed retraction reports Host recovery instead of claiming success");
+
+    auto craftStore = makeStore();
+    PlacementHost craftHost;
+    const PlacementRequest crafted{"scene/durable-campfire", {}};
+    check(!craftAndPlaceWorldItemDurable(craftStore, craftHost,
+        campfire(), "bag", "durable-build", "campfire-1", crafted,
+        [](const Store&, const PlacementRequest&) { return false; }),
+        "failed craft save rejects candidate");
+    check(craftHost.retracted == 1
+          && craftStore.findCraftReceipt("durable-build") == nullptr
+          && craftStore.findItem("wood-1")->quantity == 5
+          && craftStore.findItem("iron-1")->quantity == 2,
+          "failed craft save preserves materials and receipt state");
+    check(craftAndPlaceWorldItemDurable(craftStore, craftHost,
+        campfire(), "bag", "durable-build", "campfire-1", crafted,
+        [](const Store& candidate, const PlacementRequest& request) {
+            return candidate.findItem("campfire-1")->location
+                == Location{Place::World, request.worldObjectId, {}}
+                && candidate.findCraftReceipt("durable-build") != nullptr;
+        }), "craft save retry commits output");
+    check(craftStore.findItem("wood-1")->quantity == 2
+          && craftStore.findItem("iron-1")->quantity == 1,
+          "craft materials consumed once");
+}
 
 void throwingHostsDoNotPublishHalfTransactions()
 {
@@ -421,6 +505,7 @@ int main()
         concurrentReservations();
         interactionAndPlacement();
         directCraftPlacementIsOneRecoverableHandoff();
+        durablePlacementSavesCandidateOrRetractsWorld();
         throwingHostsDoNotPublishHalfTransactions();
         std::cout << "AYInventory: world transactions passed\n";
     } catch (const std::exception& error) {

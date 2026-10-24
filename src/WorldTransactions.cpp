@@ -34,6 +34,38 @@ template<class F> Result<void> invokeHost(F&& callback, const char* stage)
                             std::string(stage) + " threw an unknown exception");
     }
 }
+
+Result<void> publishAndSave(Store& store, Store& staged,
+                            IDurablePlacementHost& host,
+                            const PlacementRequest& request, const Item& item,
+                            const PlacementSave& save)
+{
+    if (!save) return reject<void>(Error::Invalid, "missing placement save callback");
+    if (auto prepared = invokeHost([&] { return host.prepare(request, item); },
+                                   "World placement preparation"); !prepared) {
+        host.abort();
+        return prepared;
+    }
+    if (auto published = invokeHost([&] { return host.publish(); },
+                                    "World placement publication"); !published) {
+        host.abort();
+        return published;
+    }
+    auto saved = invokeHost([&]() -> Result<void> {
+        if (!save(staged, request))
+            return reject<void>(Error::Stale, "placement save rejected candidate");
+        return {};
+    }, "Placement save");
+    if (!saved) {
+        if (!host.retractPublished(request))
+            return reject<void>(Error::Stale,
+                "placement save failed and published object could not be retracted");
+        return saved;
+    }
+    store.swap(staged);
+    host.commitPublished();
+    return {};
+}
 } // namespace
 
 std::optional<InteractionCandidate> chooseFocus(
@@ -139,7 +171,27 @@ Result<void> placeWorldItem(Store& store, IPlacementHost& host,
         return published;
     }
     store.swap(staged);
+    host.commitPublished();
     return {};
+}
+
+Result<void> placeWorldItemDurable(Store& store, IDurablePlacementHost& host,
+    std::string_view itemId, const Location& source,
+    PlacementRequest request, std::string requestId, const PlacementSave& save)
+{
+    if (source.place != Place::Container || request.worldObjectId.empty()
+        || !validPose(request.pose))
+        return reject<void>(Error::Invalid, "invalid placement source or pose");
+    const auto* item = store.findItem(itemId);
+    if (!item) return reject<void>(Error::Missing, "placement item missing");
+    const Location destination{Place::World, request.worldObjectId, {}};
+    Store staged = store;
+    if (auto moved = staged.transfer(itemId, source, destination,
+                                     std::move(requestId)); !moved) return moved;
+    if (item->location == destination)
+        return invokeHost([&] { return host.verifyPublished(request, *item); },
+                          "Published object verification");
+    return publishAndSave(store, staged, host, request, *item, save);
 }
 
 Result<void> craftAndPlaceWorldItem(Store& store, IPlacementHost& host,
@@ -182,7 +234,38 @@ Result<void> craftAndPlaceWorldItem(Store& store, IPlacementHost& host,
         return published;
     }
     store.swap(staged);
+    host.commitPublished();
     return {};
+}
+
+Result<void> craftAndPlaceWorldItemDurable(Store& store,
+    IDurablePlacementHost& host, const Recipe& recipe,
+    std::string_view sourceContainerId, std::string craftRequestId,
+    std::string outputItemId, PlacementRequest request,
+    const PlacementSave& save)
+{
+    if (craftRequestId.empty() || outputItemId.empty()
+        || request.worldObjectId.empty() || !validPose(request.pose))
+        return reject<void>(Error::Invalid, "invalid craft placement identity or pose");
+    const Location destination{Place::World, request.worldObjectId, {}};
+    if (const auto* receipt = store.findCraftReceipt(craftRequestId)) {
+        if (*receipt != CraftReceipt{outputItemId, destination})
+            return reject<void>(Error::Duplicate, "craft placement retry changed output");
+        const auto* existing = store.findItem(outputItemId);
+        if (!existing || existing->location != destination)
+            return reject<void>(Error::Stale, "crafted world item has moved or vanished");
+        return invokeHost([&] { return host.verifyPublished(request, *existing); },
+                          "Crafted object verification");
+    }
+    Store staged = store;
+    if (auto reserved = staged.reserveCraft(recipe, sourceContainerId,
+                                            craftRequestId); !reserved)
+        return reserved;
+    if (auto crafted = staged.commitCraft(craftRequestId, outputItemId,
+                                          destination); !crafted)
+        return crafted;
+    return publishAndSave(store, staged, host, request,
+                          *staged.findItem(outputItemId), save);
 }
 
 } // namespace ayt::inventory

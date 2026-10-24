@@ -179,6 +179,8 @@ Result<void> ScenePhysicsHost3D::prepare(const PlacementRequest& request,
                                          const Item& item)
 {
     if (_prepared) return fail<void>(Error::Duplicate, "placement already prepared");
+    if (!_retractableId.empty())
+        return fail<void>(Error::Stale, "previous publication must be committed or retracted");
     if (!validEntityId(request.worldObjectId) || item.id.empty())
         return fail<void>(Error::Invalid, "placement needs an Entity persistent ID");
     if (!_world.isInitialized() || !_query.isReady())
@@ -247,6 +249,7 @@ Result<void> ScenePhysicsHost3D::publish()
             static_cast<float>(request.pose.halfExtents[0]),
             static_cast<float>(request.pose.halfExtents[1]),
             static_cast<float>(request.pose.halfExtents[2])};
+        _retractableId = request.worldObjectId;
         _prepared.reset();
         return {};
     } catch (const std::exception&) {
@@ -260,6 +263,27 @@ Result<void> ScenePhysicsHost3D::publish()
 void ScenePhysicsHost3D::abort() noexcept
 {
     _prepared.reset();
+}
+
+void ScenePhysicsHost3D::commitPublished() noexcept
+{
+    _retractableId.clear();
+}
+
+bool ScenePhysicsHost3D::retractPublished(
+    const PlacementRequest& request) noexcept
+{
+    try {
+        if (_retractableId.empty() || _retractableId != request.worldObjectId)
+            return false;
+        auto* entity = _world.findEntityByPersistentId(request.worldObjectId);
+        if (!entity) return false;
+        _world.destroyEntity(entity);
+        _retractableId.clear();
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 } // namespace ayt::inventory

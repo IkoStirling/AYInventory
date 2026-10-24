@@ -71,6 +71,10 @@ ctest --test-dir out/build/ayinventory --output-on-failure
 `WorldTransactions.h` 接收 Host 从 3D 射线/空间查询映射出的稳定对象 ID。
 `chooseFocus` 选最近候选，`activate` 在操作当下重验有效性与权限，完成拾取或返回可打开的容器 ID。
 `placeWorldItem` 先暂存所有权转移，调用 Host 空间检查和对象发布；发布成功后才切换 Store。
+需要立即保存时可改用 `placeWorldItemDurable` 或 `craftAndPlaceWorldItemDurable`：
+游戏的 `PlacementSave` 回调把候选 Store 与放置对象记录写入同一存档槽，失败时
+`IDurablePlacementHost` 撤销刚发布的对象并保留原 Store。`ScenePhysicsHost3D`
+实现该撤销；回调必须保证保存失败不替换旧槽，读档时从同一槽重建放置对象。
 Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 AYScene Entity 与 AYPhysics 查询
 可选用 `AYInventory::World3DHost` 的 `ScenePhysicsHost3D` 连接。游戏注入当前
 `Scene::world()`、`IPhysicsQuery`、视线与权限回调；新放置对象的 ID 必须是 Entity

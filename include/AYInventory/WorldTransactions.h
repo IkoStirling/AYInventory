@@ -3,6 +3,7 @@
 #include <AYInventory/Inventory.h>
 
 #include <array>
+#include <functional>
 #include <optional>
 #include <span>
 
@@ -80,7 +81,29 @@ public:
                                  const Item& item) = 0;
     virtual Result<void> publish() = 0;
     virtual void abort() noexcept = 0;
+    /// Release any temporary rollback token after the Store is published.
+    virtual void commitPublished() noexcept {}
 };
+
+/// Optional Host contract for a placement whose candidate Store and world
+/// object are also committed to one game-owned durable save boundary. After
+/// publish succeeds, retractPublished must remove exactly that object on a
+/// failed save callback. It must not touch the Store or any preexisting object.
+class IDurablePlacementHost : public IPlacementHost {
+public:
+    /// Only the object from the immediately preceding successful publish may
+    /// be retracted; return false if that exact rollback cannot be completed.
+    virtual bool retractPublished(const PlacementRequest& request) noexcept = 0;
+};
+
+/// Save a candidate Store and placement record in the same game-owned slot.
+/// The callback must be failure-atomic: true means the complete durable
+/// payload has been accepted; false means no new payload was published. It
+/// must not mutate the Store, World or Host. The game must restore the placed
+/// object from that same payload after a crash. File durability remains the
+/// callback's responsibility.
+using PlacementSave = std::function<bool(const Store& candidate,
+                                         const PlacementRequest& request)>;
 
 /// Stage the Store transfer, ask the Host to reserve clear space, publish the
 /// world object, then swap the staged Store without allocation. Exact request
@@ -89,6 +112,13 @@ public:
 Result<void> placeWorldItem(Store& store, IPlacementHost& host,
                             std::string_view itemId, const Location& source,
                             PlacementRequest request, std::string requestId);
+
+/// As above, but save the candidate before publishing Store. If saving fails,
+/// retract the already published World object and retain the original Store.
+/// A failed retraction is reported as Stale and requires Host recovery.
+Result<void> placeWorldItemDurable(Store& store, IDurablePlacementHost& host,
+    std::string_view itemId, const Location& source,
+    PlacementRequest request, std::string requestId, const PlacementSave& save);
 
 /// Reserve materials, commit output directly to one stable World identity,
 /// and publish its object as a single Store/World handoff. Failure leaves the
@@ -101,5 +131,14 @@ Result<void> craftAndPlaceWorldItem(Store& store, IPlacementHost& host,
                                     std::string craftRequestId,
                                     std::string outputItemId,
                                     PlacementRequest request);
+
+/// Durable variant for the combined craft/placement operation. Pending craft
+/// reservations remain runtime-only; the saved candidate includes consumed
+/// materials, output ownership and the completed craft receipt.
+Result<void> craftAndPlaceWorldItemDurable(Store& store,
+    IDurablePlacementHost& host, const Recipe& recipe,
+    std::string_view sourceContainerId, std::string craftRequestId,
+    std::string outputItemId, PlacementRequest request,
+    const PlacementSave& save);
 
 } // namespace ayt::inventory
