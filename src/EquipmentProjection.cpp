@@ -4,6 +4,7 @@
 #include <set>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 namespace ayt::inventory {
 namespace {
@@ -17,6 +18,17 @@ Result<EquipmentProjection> EquipmentProjection::create(
     if (!actor.valid() || itemDomain != actor.domain)
         return reject<EquipmentProjection>(Error::Invalid, "Invalid actor or item domain");
     return EquipmentProjection(actor, itemDomain);
+}
+
+void EquipmentProjection::swapState(EquipmentProjection& other) noexcept {
+    static_assert(std::is_nothrow_swappable_v<decltype(_knownItems)>);
+    static_assert(std::is_nothrow_swappable_v<decltype(_ownedModifiers)>);
+    using std::swap;
+    swap(_actor, other._actor);
+    swap(_itemDomain, other._itemDomain);
+    _knownItems.swap(other._knownItems);
+    _ownedModifiers.swap(other._ownedModifiers);
+    swap(_selected, other._selected);
 }
 
 Result<void> EquipmentProjection::sync(const Store& store, std::string_view actorId,
@@ -95,6 +107,71 @@ Result<void> EquipmentProjection::sync(const Store& store, std::string_view acto
         return {};
     } catch (const std::exception& ex) {
         return reject<void>(Error::Invalid, ex.what());
+    }
+}
+
+Result<void> transferAndSyncEquipment(Store& store,
+    std::string_view itemId, const Location& source, const Location& destination,
+    std::string requestId, ability::Runtime& runtime,
+    std::span<const EquipmentSyncTarget> targets) {
+    static_assert(std::is_nothrow_swappable_v<stats::StatSet>);
+    if ((source.place != Place::Container && source.place != Place::Equipment)
+        || (destination.place != Place::Container
+            && destination.place != Place::Equipment)
+        || targets.empty() || targets.size() > 32)
+        return reject<void>(Error::Invalid,
+            "Equipment transfer needs container/equipment locations and 1..32 actors");
+    try {
+        std::set<std::string_view> actorIds;
+        std::set<ability::Identity> identities;
+        std::set<EquipmentProjection*> projections;
+        std::set<stats::StatSet*> statSets;
+        for (const auto& target : targets) {
+            if (!target.projection || !target.stats || target.actorId.empty()
+                || !target.modifierFactory
+                || !actorIds.insert(target.actorId).second
+                || !identities.insert(target.projection->actorIdentity()).second
+                || !projections.insert(target.projection).second
+                || !statSets.insert(target.stats).second)
+                return reject<void>(Error::Invalid,
+                    "Duplicate or incomplete equipment projection target");
+        }
+        if ((source.place == Place::Equipment
+                && !actorIds.contains(source.ownerId))
+            || (destination.place == Place::Equipment
+                && !actorIds.contains(destination.ownerId)))
+            return reject<void>(Error::Invalid,
+                "Affected equipment owner is missing from projection targets");
+
+        Store stagedStore = store;
+        if (auto moved = stagedStore.transfer(itemId, source, destination,
+                                              std::move(requestId)); !moved)
+            return moved;
+        auto stagedRuntime = runtime;
+        struct Staged {
+            EquipmentProjection projection;
+            stats::StatSet stats;
+        };
+        std::vector<Staged> staged;
+        staged.reserve(targets.size());
+        for (const auto& target : targets) {
+            staged.push_back({*target.projection, *target.stats});
+            if (auto synced = staged.back().projection.sync(stagedStore,
+                    target.actorId, target.selectedItemId, staged.back().stats,
+                    stagedRuntime, target.modifierFactory); !synced)
+                return synced;
+        }
+        if (!runtime.swapState(stagedRuntime))
+            return reject<void>(Error::Denied, "Ability runtime is committing");
+        using std::swap;
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            swap(*targets[i].stats, staged[i].stats);
+            targets[i].projection->swapState(staged[i].projection);
+        }
+        store.swap(stagedStore);
+        return {};
+    } catch (const std::exception& error) {
+        return reject<void>(Error::Invalid, error.what());
     }
 }
 } // namespace ayt::inventory

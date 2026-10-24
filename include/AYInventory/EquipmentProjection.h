@@ -5,6 +5,7 @@
 #include <AYStats/Stats.h>
 
 #include <functional>
+#include <span>
 
 namespace ayt::inventory {
 
@@ -32,6 +33,10 @@ public:
     Result<void> sync(const Store& store, std::string_view actorId,
         std::string_view selectedItemId, stats::StatSet& stats,
         ability::Runtime& ability, const ModifierFactory& modifierFactory);
+    /// Exchange only validated projection policy state; used to publish a
+    /// multi-actor candidate without allocation after all checks pass.
+    void swapState(EquipmentProjection& other) noexcept;
+    [[nodiscard]] ability::Identity actorIdentity() const noexcept { return _actor; }
 
 private:
     EquipmentProjection(ability::Identity actor, ability::Id domain)
@@ -42,5 +47,23 @@ private:
     std::vector<stats::Modifier> _ownedModifiers;
     ability::Identity _selected{};
 };
+
+struct EquipmentSyncTarget {
+    EquipmentProjection* projection = nullptr;
+    std::string_view actorId;
+    std::string_view selectedItemId;
+    stats::StatSet* stats = nullptr;
+    ModifierFactory modifierFactory;
+};
+
+/// Transfer between containers/equipment and reconcile all affected actors
+/// in one candidate Store, Stats and Ability transaction. Include a target
+/// for each source/destination equipment owner. A failed modifier, Ability or
+/// Store check leaves every live owner unchanged. World pickup/removal is a
+/// separate transaction and is not accepted here.
+[[nodiscard]] Result<void> transferAndSyncEquipment(Store& store,
+    std::string_view itemId, const Location& source, const Location& destination,
+    std::string requestId, ability::Runtime& ability,
+    std::span<const EquipmentSyncTarget> targets);
 
 } // namespace ayt::inventory

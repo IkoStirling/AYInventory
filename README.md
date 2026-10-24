@@ -36,6 +36,10 @@ Ability/Stats，并负责撤销离开装备位的效果。
 同步 AYStats 修正和 AYAbility 选中装备：先在两份候选运行时中完成预检，再一次性
 交换发布。游戏提供稳定的 Stats modifier 身份/zone 工厂，并保持它为纯函数；
 适配器保留收起装备的弹药与冷却，跨角色装备时转移相同 Ability 实例，销毁后撤销。
+跨角色装备转移可调用 `transferAndSyncEquipment`，同时提供来源与目的角色的
+`EquipmentSyncTarget`。它先在候选 Store、两个 Stats 和同一 Ability Runtime 中
+完成转移及投影，全部成功才无分配发布；第二个角色校验失败时，来源角色效果与
+Store 归属也保持原状。此入口只处理容器与装备位置，不销毁世界拾取实体。
 保存恢复时从暂存 Store、Stats、Ability 创建新的适配器再同步，不能在活动状态
 上边读档边应用。该可选目标不改变 Inventory Core 的依赖。
 定义的 `attachmentSlots` 可指定槽与

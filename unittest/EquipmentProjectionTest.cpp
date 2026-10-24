@@ -1,5 +1,6 @@
 #include <AYInventory/EquipmentProjection.h>
 
+#include <array>
 #include <iostream>
 #include <stdexcept>
 
@@ -95,23 +96,45 @@ int main() {
     check(heroStats.version()==version && runtime.equipment(swordId)->ammunition==ammo,
         "failed projection preserves both runtimes");
 
-    check(bool(store.transfer("sword-1",heroHand,allyHand,"give-1")), "give to ally");
-    check(bool(heroProjection->sync(store,"hero","",heroStats,runtime,factory)), "hero clears effects");
     const i::ModifierFactory wrongZone=[](const i::Store::EquippedProfile& profile,
         std::size_t index) {
         const auto& bonus=profile.statBonuses[index];
         return s::Modifier{.handle=17,.effect=1,.rule=1,
             .target=bonus.statId,.zone=99,.value=bonus.flat};
     };
-    check(!allyProjection->sync(store,"ally","sword-1",allyStats,runtime,wrongZone),
-        "Stats preflight rejects invalid zone");
-    check(runtime.equipment(swordId)->owner==hero
-        && allyStats.read(s::statId("attack"))->effective==10,
-        "failed Stats keeps Ability transfer unpublished");
-    check(bool(allyProjection->sync(store,"ally","sword-1",allyStats,runtime,factory)), "ally receives effects");
+    const std::array<i::EquipmentSyncTarget,2> rejectedTargets{{
+        {&*heroProjection,"hero","",&heroStats,factory},
+        {&*allyProjection,"ally","sword-1",&allyStats,wrongZone}}};
+    check(!i::transferAndSyncEquipment(store,"sword-1",heroHand,allyHand,
+            "give-1",runtime,rejectedTargets),
+        "invalid destination Stats refuses entire transfer");
+    check(store.findItem("sword-1")->location==heroHand
+        && heroStats.read(s::statId("attack"))->effective==15
+        && allyStats.read(s::statId("attack"))->effective==10
+        && runtime.equipment(swordId)->owner==hero,
+        "failed transfer preserves Store and both actors");
+    const std::array<i::EquipmentSyncTarget,2> acceptedTargets{{
+        {&*heroProjection,"hero","",&heroStats,factory},
+        {&*allyProjection,"ally","sword-1",&allyStats,factory}}};
+    check(!i::transferAndSyncEquipment(store,"sword-1",heroHand,allyHand,
+            "give-1",runtime,std::span(acceptedTargets).subspan(0,1)),
+        "destination actor projection is required");
+    check(store.findItem("sword-1")->location==heroHand
+        && heroStats.read(s::statId("attack"))->effective==15,
+        "missing target leaves all owners unchanged");
+    check(bool(i::transferAndSyncEquipment(store,"sword-1",heroHand,allyHand,
+            "give-1",runtime,acceptedTargets)), "atomic give to ally");
+    check(store.findItem("sword-1")->location==allyHand
+        && heroStats.read(s::statId("attack"))->effective==10,
+        "source effects clear with ownership transfer");
     check(runtime.equipment(swordId)->owner==ally
         && runtime.equipment(swordId)->ammunition==ammo
         && allyStats.read(s::statId("attack"))->effective==15, "transfer keeps state");
+    check(bool(i::transferAndSyncEquipment(store,"sword-1",heroHand,allyHand,
+            "give-1",runtime,acceptedTargets)), "exact retry is harmless");
+    check(runtime.equipment(swordId)->owner==ally
+        && allyStats.read(s::statId("attack"))->effective==15,
+        "retry does not duplicate modifiers or equipment");
     check(bool(store.transfer("sword-1",allyHand,bag,"stow-2")), "ally stows");
     check(bool(allyProjection->sync(store,"ally","",allyStats,runtime,factory)), "ally removes effects");
     check(bool(store.destroyItem("sword-1")), "destroy item");
