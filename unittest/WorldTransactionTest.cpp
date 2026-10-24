@@ -45,19 +45,25 @@ struct InteractionHost final : IInteractionHost {
     bool current = true;
     bool permitted = true;
     bool consume = true;
+    bool throwValidation = false;
+    bool throwAuthorization = false;
+    bool throwConsumption = false;
     int consumed = 0;
     Result<void> validateCurrent(const InteractionCandidate&, std::string_view) override
     {
+        if (throwValidation) throw std::runtime_error("validation fault");
         if (!current) return std::unexpected(Diagnostic{Error::Stale, "ray expired"});
         return {};
     }
     Result<void> authorize(const InteractionCandidate&, std::string_view) override
     {
+        if (throwAuthorization) throw std::runtime_error("authorization fault");
         if (!permitted) return std::unexpected(Diagnostic{Error::Denied, "not permitted"});
         return {};
     }
     Result<void> consumeWorldPickup(const InteractionCandidate&) override
     {
+        if (throwConsumption) throw std::runtime_error("consumption fault");
         if (!consume) return std::unexpected(Diagnostic{Error::Stale, "despawn failed"});
         ++consumed;
         return {};
@@ -68,28 +74,85 @@ struct PlacementHost final : IPlacementHost {
     bool clear = true;
     bool canPublish = true;
     bool samePose = true;
+    bool throwPrepare = false;
+    bool throwPublish = false;
+    bool throwVerify = false;
     int prepared = 0;
     int published = 0;
     int aborted = 0;
     Result<void> verifyPublished(const PlacementRequest&, const Item&) override
     {
+        if (throwVerify) throw std::runtime_error("verify fault");
         if (!samePose) return std::unexpected(Diagnostic{Error::Duplicate, "pose changed"});
         return {};
     }
     Result<void> prepare(const PlacementRequest&, const Item&) override
     {
         ++prepared;
+        if (throwPrepare) throw std::runtime_error("prepare fault");
         if (!clear) return std::unexpected(Diagnostic{Error::Occupied, "space blocked"});
         return {};
     }
     Result<void> publish() override
     {
+        if (throwPublish) throw std::runtime_error("publish fault");
         if (!canPublish) return std::unexpected(Diagnostic{Error::Stale, "world publish failed"});
         ++published;
         return {};
     }
     void abort() noexcept override { ++aborted; }
 };
+
+void throwingHostsDoNotPublishHalfTransactions()
+{
+    auto store = makeStore();
+    const Location drop{Place::World, "scene/throwing-drop", {}};
+    const Location bag{Place::Container, "bag", "c"};
+    check(store.createItem({"throwing-item", "wood", 1, drop}), "world item");
+    const InteractionCandidate candidate{InteractionCandidate::Kind::Pickup,
+        drop.ownerId, "throwing-item", 1.0};
+    InteractionHost interaction;
+    interaction.throwValidation = true;
+    check(!activate(store, interaction, candidate, "player", bag, "pickup-throw"),
+          "validation exception rejected");
+    interaction.throwValidation = false;
+    interaction.throwAuthorization = true;
+    check(!activate(store, interaction, candidate, "player", bag, "pickup-throw"),
+          "authorization exception rejected");
+    interaction.throwAuthorization = false;
+    interaction.throwConsumption = true;
+    check(!activate(store, interaction, candidate, "player", bag, "pickup-throw"),
+          "consumption exception rejected");
+    check(store.findItem("throwing-item")->location == drop
+          && interaction.consumed == 0,
+          "failed pickup leaves both owners unchanged");
+    interaction.throwConsumption = false;
+    check(activate(store, interaction, candidate, "player", bag, "pickup-throw"),
+          "retry after host fault succeeds once");
+
+    PlacementHost placement;
+    PlacementRequest request{"scene/throwing-placement", {}};
+    placement.throwPrepare = true;
+    check(!placeWorldItem(store, placement, "throwing-item", bag,
+                          request, "place-throw"), "preparation exception rejected");
+    check(placement.aborted == 1 && store.findItem("throwing-item")->location == bag,
+          "preparation exception aborts staged world state");
+    placement.throwPrepare = false;
+    placement.throwPublish = true;
+    check(!placeWorldItem(store, placement, "throwing-item", bag,
+                          request, "place-throw"), "publication exception rejected");
+    check(placement.aborted == 2 && store.findItem("throwing-item")->location == bag,
+          "publication exception aborts staged world state");
+    placement.throwPublish = false;
+    check(placeWorldItem(store, placement, "throwing-item", bag,
+                         request, "place-throw"), "retry publishes once");
+    placement.throwVerify = true;
+    check(!placeWorldItem(store, placement, "throwing-item", bag,
+                          request, "place-throw"), "verification exception rejected");
+    check(placement.published == 1 && store.findItem("throwing-item")->location
+          == Location{Place::World, request.worldObjectId, {}},
+          "verification exception does not duplicate the object");
+}
 
 void craftReservations()
 {
@@ -317,6 +380,7 @@ int main()
         craftAcrossStacks();
         concurrentReservations();
         interactionAndPlacement();
+        throwingHostsDoNotPublishHalfTransactions();
         std::cout << "AYInventory: world transactions passed\n";
     } catch (const std::exception& error) {
         std::cerr << "AYInventory: " << error.what() << '\n';

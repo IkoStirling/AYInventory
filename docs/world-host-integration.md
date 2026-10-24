@@ -11,7 +11,7 @@ layers on the same Sim thread while running one interaction command.
    tie breaking.
 2. In `IInteractionHost::validateCurrent`, recheck the live object, generation,
    hit and reach. In `authorize`, enforce game-owned access rules. For pickup,
-   `consumeWorldPickup` must remove the drop atomically: on failure it leaves
+   `consumeWorldPickup` must remove the drop atomically: on failure or throw it leaves
    the drop present. AYInventory publishes the already-validated Store transfer
    only after that call succeeds. For a container, `activate` returns its ID;
    the game opens its own UI.
@@ -22,10 +22,17 @@ layers on the same Sim thread while running one interaction command.
 4. For placement, map `PlacementPose` and extents to the Scene's world pose and
    the object's occupancy policy. `IPlacementHost::prepare` checks space and
    stages one object under `worldObjectId`; `publish` must expose it completely
-   or leave it absent, and `abort` must remove staging. AYInventory then makes
+   or leave it absent, and `abort` must remove staging even when prepare or
+   publish throws. AYInventory then makes
    the item world-owned. `verifyPublished` compares the saved object and pose on
    an exact request retry. A save records both the Store's world owner ID and
    the game/Scene object's transform. Rebuild both under that same ID on load.
+
+For a save assembled from an authored Scene, mark the picked-up authored drop
+as deleted in `WorldStateLedger`. On load, decode a separate candidate ledger,
+restore the tombstone and Store participant into a disposable Scene, then
+activate it. The Scene restore test also saves a placed runtime Entity with
+its Store world owner ID and checks both after a second load.
 
 The current public physics query facade has ray and sphere overlap queries.
 Sphere overlap is conservative for oriented boxes or irregular footprints.

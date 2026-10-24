@@ -73,6 +73,17 @@ if(BUILD_TESTING)
             "AY_INVENTORY_LEDGER_TEST_ROOT=\"${CMAKE_CURRENT_BINARY_DIR}/inventory-ledger-test-output\"")
         add_test(NAME AYInventoryLedgerTest COMMAND AYInventoryLedgerTest)
     endif()
+    if(TARGET AYScene AND TARGET AYApplicationSaveGame
+       AND TARGET AYInventoryJson AND TARGET AYInventoryWorld3DHost)
+        add_executable(AYInventorySceneRestoreTest
+            unittest/InventorySceneRestoreTest.cpp)
+        target_link_libraries(AYInventorySceneRestoreTest PRIVATE
+            AYInventoryWorld3DHost AYInventoryJson AYApplicationSaveGame
+            AYScene AYEntity)
+        target_compile_definitions(AYInventorySceneRestoreTest PRIVATE
+            "AY_INVENTORY_SCENE_TEST_ROOT=\"${CMAKE_CURRENT_BINARY_DIR}/inventory-scene-test-output\"")
+        add_test(NAME AYInventorySceneRestoreTest COMMAND AYInventorySceneRestoreTest)
+    endif()
 endif()
 
 add_executable(AYInventoryPickupExample demo/PickupEquip.cpp)

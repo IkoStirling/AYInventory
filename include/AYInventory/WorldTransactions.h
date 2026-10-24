@@ -25,6 +25,7 @@ struct InteractionCandidate {
 
 /// Host must recheck current-world hit/reach and game-specific permission at
 /// activation time. A candidate retained across frames is never authority.
+/// Callbacks must not mutate or reenter the Store used by the active command.
 class IInteractionHost {
 public:
     virtual ~IInteractionHost() = default;
@@ -32,8 +33,9 @@ public:
                                          std::string_view actorId) = 0;
     virtual Result<void> authorize(const InteractionCandidate& candidate,
                                    std::string_view actorId) = 0;
-    /// Atomically remove the current world drop or fail without removing it.
-    /// Store publishes the already-staged ownership change only on success.
+    /// Atomically remove the current world drop or fail without removing it,
+    /// including when this callback throws. Store publishes staged ownership
+    /// only on success.
     virtual Result<void> consumeWorldPickup(const InteractionCandidate& candidate) = 0;
 };
 
@@ -44,7 +46,9 @@ struct Activation {
 };
 
 /// Pickup transfers one world item into a named container slot. Opening a
-/// container returns its stable ID without changing inventory state.
+/// container returns its stable ID without changing inventory state. Host
+/// exceptions become failure diagnostics; callbacks must obey their atomic
+/// world-side contract even when throwing.
 Result<Activation> activate(Store& store, IInteractionHost& host,
                             const InteractionCandidate& candidate,
                             std::string_view actorId,
@@ -64,7 +68,9 @@ struct PlacementRequest {
 
 /// World adapter stages an object and its occupancy check in prepare().
 /// publish() must either make the object fully visible or leave it absent.
-/// abort() discards any prepared state, including after a failed publish().
+/// abort() discards any prepared state, including after a failed or throwing
+/// prepare()/publish(). It must not throw. Callbacks must not mutate or
+/// reenter the Store used by the active command.
 class IPlacementHost {
 public:
     virtual ~IPlacementHost() = default;
@@ -78,7 +84,8 @@ public:
 
 /// Stage the Store transfer, ask the Host to reserve clear space, publish the
 /// world object, then swap the staged Store without allocation. Exact request
-/// retries do not republish the object. The Host owns Scene/Physics adaptation.
+/// retries do not republish the object. Host exceptions become diagnostics and
+/// failed preparation/publication calls abort(). The Host owns Scene/Physics.
 Result<void> placeWorldItem(Store& store, IPlacementHost& host,
                             std::string_view itemId, const Location& source,
                             PlacementRequest request, std::string requestId);

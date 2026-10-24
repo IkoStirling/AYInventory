@@ -67,6 +67,13 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   重复 ID；`publish` 创建 Spatial Entity、世界姿态、静态 3D 刚体和盒碰撞描述。
   创建过程失败清理新 Entity，成功后 Store 才交换所有权。重试验证 ID、姿态与碰撞
   半尺寸；实际物理体在 EntityPhysicsBridge 的下一次预物理同步产生。
+- `activate` 和 `placeWorldItem` 把 Host 回调异常转为失败诊断。放置的 `prepare` 或
+  `publish` 抛异常时仍执行 `abort`；拾取的 `consumeWorldPickup` 即使抛异常也必须
+  保持世界侧失败原子性。Host 回调不得改写或重入同一个 Store；Store 的暂存状态
+  仅在 Host 全部成功后交换。
+- Scene/Store 联合读档需先解码独立候选账本，在暂存 Scene 注册作者掉落的墓碑
+  回调与 Store 快照参与者，全部恢复成功再发布。放置后同时保存动态 Entity 和
+  Store 的世界归属 ID；`AYInventorySceneRestoreTest` 验证来回恢复不复制物品。
 - 球体检测对旋转盒和细长对象保守，可能拒绝本可放置的空间；游戏可按需另行实现更
   精确的 IPlacementHost。适配不隐式注册 Entity 组件、保存场景或实现游戏权限；调用者
   在 Sim 边界使用它，World/Store 卸载和恢复时重新注入当前实例。

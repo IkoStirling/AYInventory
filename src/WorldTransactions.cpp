@@ -1,6 +1,7 @@
 #include <AYInventory/WorldTransactions.h>
 
 #include <cmath>
+#include <exception>
 #include <utility>
 
 namespace ayt::inventory {
@@ -19,6 +20,19 @@ bool validPose(const PlacementPose& pose)
     double squareNorm = 0.0;
     for (const auto value : pose.rotation) squareNorm += value * value;
     return std::abs(squareNorm - 1.0) <= 0.001;
+}
+
+template<class F> Result<void> invokeHost(F&& callback, const char* stage)
+{
+    try {
+        return callback();
+    } catch (const std::exception& error) {
+        return reject<void>(Error::Stale,
+                            std::string(stage) + " threw: " + error.what());
+    } catch (...) {
+        return reject<void>(Error::Stale,
+                            std::string(stage) + " threw an unknown exception");
+    }
 }
 } // namespace
 
@@ -67,11 +81,17 @@ Result<Activation> activate(Store& store, IInteractionHost& host,
         // A persisted transfer receipt proves an exact retry. The original
         // world object may already have been removed, so no ray is required.
         if (item->location == *pickupDestination) return result;
-        if (auto valid = host.validateCurrent(candidate, actorId); !valid)
+        if (auto valid = invokeHost([&] {
+                return host.validateCurrent(candidate, actorId);
+            }, "Interaction validation"); !valid)
             return std::unexpected(valid.error());
-        if (auto allowed = host.authorize(candidate, actorId); !allowed)
+        if (auto allowed = invokeHost([&] {
+                return host.authorize(candidate, actorId);
+            }, "Interaction authorization"); !allowed)
             return std::unexpected(allowed.error());
-        if (auto consumed = host.consumeWorldPickup(candidate); !consumed)
+        if (auto consumed = invokeHost([&] {
+                return host.consumeWorldPickup(candidate);
+            }, "World pickup consumption"); !consumed)
             return std::unexpected(consumed.error());
         store.swap(staged);
         return result;
@@ -80,9 +100,13 @@ Result<Activation> activate(Store& store, IInteractionHost& host,
         return reject<Activation>(Error::Invalid, "unknown interaction kind");
     if (!store.hasContainer(candidate.subjectId))
         return reject<Activation>(Error::Missing, "container missing");
-    if (auto valid = host.validateCurrent(candidate, actorId); !valid)
+    if (auto valid = invokeHost([&] {
+            return host.validateCurrent(candidate, actorId);
+        }, "Interaction validation"); !valid)
         return std::unexpected(valid.error());
-    if (auto allowed = host.authorize(candidate, actorId); !allowed)
+    if (auto allowed = invokeHost([&] {
+            return host.authorize(candidate, actorId);
+        }, "Interaction authorization"); !allowed)
         return std::unexpected(allowed.error());
     return result;
 }
@@ -101,12 +125,16 @@ Result<void> placeWorldItem(Store& store, IPlacementHost& host,
     if (auto moved = staged.transfer(itemId, source, destination, std::move(requestId));
         !moved) return moved;
     if (item->location == destination)
-        return host.verifyPublished(request, *item);
-    if (auto prepared = host.prepare(request, *item); !prepared) {
+        return invokeHost([&] { return host.verifyPublished(request, *item); },
+                          "Published object verification");
+    if (auto prepared = invokeHost([&] {
+            return host.prepare(request, *item);
+        }, "World placement preparation"); !prepared) {
         host.abort();
         return prepared;
     }
-    if (auto published = host.publish(); !published) {
+    if (auto published = invokeHost([&] { return host.publish(); },
+                                    "World placement publication"); !published) {
         host.abort();
         return published;
     }

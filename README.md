@@ -66,3 +66,7 @@ Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 A
 示例：`AYInventoryPickupExample` 演示世界掉落→背包→装备；
 `AYInventoryCraftPlaceExample` 演示制作→世界放置。详细失败语义见 [design.md](design.md)。
 实际 Host 映射顺序见 [world-host-integration.md](docs/world-host-integration.md)。
+`AYInventorySceneRestoreTest` 在支持 Scene/Physics/SaveGame 的构建中验证作者掉落
+拾取后的墓碑恢复、背包所有权、重新放置与再次读档。交互/放置 Host 抛异常时返回
+错误结果；放置准备或发布抛异常也会执行 `abort()`，Host 须保证失败时世界侧
+没有留下半成品。
