@@ -59,7 +59,7 @@ Result<std::set<std::string>> slots(const Json& data)
 Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
 {
     try {
-        if (snapshot.schemaVersion < 2 || snapshot.schemaVersion > 6)
+        if (snapshot.schemaVersion < 2 || snapshot.schemaVersion > 7)
             return invalid<std::string>("unsupported inventory schema");
         if (snapshot.schemaVersion < 4 && !snapshot.retiredItemIds.empty())
             return invalid<std::string>("legacy inventory schema cannot encode retired IDs");
@@ -69,6 +69,8 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
                     return invalid<std::string>("legacy inventory schema cannot encode attachments");
         if (snapshot.schemaVersion < 6 && !snapshot.completedMerges.empty())
             return invalid<std::string>("legacy inventory schema cannot encode merge receipts");
+        if (snapshot.schemaVersion < 7 && !snapshot.pendingCrafts.empty())
+            return invalid<std::string>("legacy inventory schema cannot encode pending crafts");
         Json root = {{"format", "AliyatInventory"},
                      {"schemaVersion", snapshot.schemaVersion},
                      {"catalogVersion", snapshot.catalogVersion},
@@ -80,6 +82,8 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
             root["retiredItems"] = snapshot.retiredItemIds;
         if (snapshot.schemaVersion >= 6)
             root["merges"] = Json::array();
+        if (snapshot.schemaVersion >= 7)
+            root["pendingCrafts"] = Json::array();
         for (const auto& value : snapshot.containers)
             root["containers"].push_back({{"id", value.id}, {"slots", value.slots}});
         for (const auto& value : snapshot.actors)
@@ -110,6 +114,24 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
                     {"quantity", receipt.quantity},
                     {"sourceAfter", receipt.sourceAfter},
                     {"targetAfter", receipt.targetAfter}});
+        if (snapshot.schemaVersion >= 7)
+            for (const auto& [request, craft] : snapshot.pendingCrafts) {
+                Json recipeInputs = Json::array();
+                for (const auto& input : craft.recipe.inputs)
+                    recipeInputs.push_back({{"definition", input.definitionId},
+                                            {"quantity", input.quantity}});
+                Json materials = Json::array();
+                for (const auto& input : craft.inputs)
+                    materials.push_back({{"item", input.itemId},
+                                         {"quantity", input.quantity}});
+                root["pendingCrafts"].push_back({{"request", request},
+                    {"source", craft.sourceContainerId},
+                    {"recipe", {{"id", craft.recipe.id},
+                        {"inputs", std::move(recipeInputs)},
+                        {"outputDefinition", craft.recipe.outputDefinitionId},
+                        {"outputQuantity", craft.recipe.outputQuantity}}},
+                    {"materials", std::move(materials)}});
+            }
         return root.dump();
     } catch (const std::exception& ex) {
         return invalid<std::string>(ex.what());
@@ -126,7 +148,7 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
         std::string format;
         if (!text(root, "format", format) || format != "AliyatInventory"
             || !u32(root, "schemaVersion", snapshot.schemaVersion)
-            || snapshot.schemaVersion < 2 || snapshot.schemaVersion > 6
+            || snapshot.schemaVersion < 2 || snapshot.schemaVersion > 7
             || !u32(root, "catalogVersion", snapshot.catalogVersion)
             || !u64(root, "nextAbilityBindingId", snapshot.nextAbilityBindingId))
             return invalid<Snapshot>("invalid inventory header");
@@ -146,6 +168,10 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
              && (!root.contains("merges") || !root.at("merges").is_array()))
             || (snapshot.schemaVersion < 6 && root.contains("merges")))
             return invalid<Snapshot>("invalid merges array");
+        if ((snapshot.schemaVersion >= 7
+             && (!root.contains("pendingCrafts") || !root.at("pendingCrafts").is_array()))
+            || (snapshot.schemaVersion < 7 && root.contains("pendingCrafts")))
+            return invalid<Snapshot>("invalid pending crafts array");
         if (snapshot.schemaVersion >= 4) {
             for (const auto& value : root["retiredItems"]) {
                 if (!value.is_string())
@@ -234,6 +260,39 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
                     || receipt.targetAfter < receipt.quantity
                     || !snapshot.completedMerges.emplace(request, receipt).second)
                     return invalid<Snapshot>("invalid merge receipt");
+            }
+        if (snapshot.schemaVersion >= 7)
+            for (const auto& value : root["pendingCrafts"]) {
+                std::string request;
+                PendingCraft craft;
+                if (!text(value, "request", request)
+                    || !text(value, "source", craft.sourceContainerId)
+                    || !value.contains("recipe") || !value.at("recipe").is_object()
+                    || !value.contains("materials") || !value.at("materials").is_array())
+                    return invalid<Snapshot>("invalid pending craft record");
+                const auto& recipe = value.at("recipe");
+                if (!text(recipe, "id", craft.recipe.id)
+                    || !text(recipe, "outputDefinition", craft.recipe.outputDefinitionId)
+                    || !u32(recipe, "outputQuantity", craft.recipe.outputQuantity)
+                    || !recipe.contains("inputs") || !recipe.at("inputs").is_array())
+                    return invalid<Snapshot>("invalid pending craft recipe");
+                for (const auto& input : recipe.at("inputs")) {
+                    Recipe::Ingredient ingredient;
+                    if (!text(input, "definition", ingredient.definitionId)
+                        || !u32(input, "quantity", ingredient.quantity))
+                        return invalid<Snapshot>("invalid pending craft ingredient");
+                    craft.recipe.inputs.push_back(std::move(ingredient));
+                }
+                for (const auto& input : value.at("materials")) {
+                    ReservedCraftInput material;
+                    if (!text(input, "item", material.itemId)
+                        || !u32(input, "quantity", material.quantity))
+                        return invalid<Snapshot>("invalid pending craft material");
+                    craft.inputs.push_back(std::move(material));
+                }
+                if (!snapshot.pendingCrafts.emplace(std::move(request),
+                                                    std::move(craft)).second)
+                    return invalid<Snapshot>("duplicate pending craft request");
             }
         return snapshot;
     } catch (const std::exception& ex) {

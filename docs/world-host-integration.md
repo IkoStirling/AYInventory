@@ -17,8 +17,11 @@ layers on the same Sim thread while running one interaction command.
    the game opens its own UI.
 3. Craft in a registered material container. Reserve before entering the
    crafting animation; cancel on interruption; commit with a new stable item
-   ID and an empty output slot. Pending reservations are not saved. A load
-   restores the materials untouched and a caller can reserve again.
+   ID and an empty output slot. An ordinary `snapshot()` omits pending
+   reservations, so a load restores the materials untouched. To resume a
+   long-running craft, save `snapshotWithReservations()` schema v7 with the
+   same Store state; restore validates exact reserved item IDs and quantities
+   before making the Store active.
 4. For placement, map `PlacementPose` and extents to the Scene's world pose and
    the object's occupancy policy. `IPlacementHost::prepare` checks space and
    stages one object under `worldObjectId`; `publish` must expose it completely

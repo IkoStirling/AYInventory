@@ -357,7 +357,7 @@ Result<void> Store::reserveCraft(const Recipe& recipe,
     if (!output) return reject<void>(Error::Missing, "output definition missing");
     if (recipe.outputQuantity > output->maxStack)
         return reject<void>(Error::Capacity, "output exceeds stack limit");
-    Reservation staged{recipe, std::string(sourceContainerId), {}};
+    PendingCraft staged{recipe, std::string(sourceContainerId), {}};
     std::set<std::string> seenDefinitions;
     for (const auto& ingredient : recipe.inputs) {
         if (ingredient.definitionId.empty() || ingredient.quantity == 0
@@ -516,11 +516,19 @@ Snapshot Store::snapshot() const
     return result;
 }
 
+Snapshot Store::snapshotWithReservations() const
+{
+    Snapshot result = snapshot();
+    result.schemaVersion = 7;
+    result.pendingCrafts = _reservations;
+    return result;
+}
+
 Result<void> Store::restore(const Snapshot& saved)
 {
     if ((saved.schemaVersion != 2 && saved.schemaVersion != 3
          && saved.schemaVersion != 4 && saved.schemaVersion != 5
-         && saved.schemaVersion != 6)
+         && saved.schemaVersion != 6 && saved.schemaVersion != 7)
         || saved.catalogVersion != _catalogVersion)
         return reject<void>(Error::ContentVersion, "inventory snapshot version mismatch");
     if (saved.schemaVersion == 2 && !saved.completedCrafts.empty())
@@ -529,6 +537,8 @@ Result<void> Store::restore(const Snapshot& saved)
         return reject<void>(Error::Invalid, "legacy snapshot cannot contain retired IDs");
     if (saved.schemaVersion < 6 && !saved.completedMerges.empty())
         return reject<void>(Error::Invalid, "legacy snapshot cannot contain merge receipts");
+    if (saved.schemaVersion < 7 && !saved.pendingCrafts.empty())
+        return reject<void>(Error::Invalid, "legacy snapshot cannot contain pending crafts");
     Store next(_catalogVersion);
     next._definitions = _definitions;
     for (const auto& container : saved.containers)
@@ -579,6 +589,48 @@ Result<void> Store::restore(const Snapshot& saved)
             return reject<void>(Error::Invalid, "invalid craft receipt");
     }
     next._completedCrafts = saved.completedCrafts;
+    for (const auto& [request, craft] : saved.pendingCrafts) {
+        if (request.empty() || next._completedCrafts.contains(request)
+            || !next.hasContainer(craft.sourceContainerId)
+            || craft.recipe.id.empty() || craft.recipe.inputs.empty()
+            || craft.recipe.outputDefinitionId.empty()
+            || craft.recipe.outputQuantity == 0 || craft.inputs.empty())
+            return reject<void>(Error::Invalid, "invalid pending craft identity");
+        const auto output = next.findDefinition(craft.recipe.outputDefinitionId);
+        if (!output || craft.recipe.outputQuantity > output->maxStack)
+            return reject<void>(Error::Invalid, "invalid pending craft output");
+        std::map<std::string, std::uint64_t> needed;
+        for (const auto& ingredient : craft.recipe.inputs) {
+            if (ingredient.definitionId.empty() || ingredient.quantity == 0
+                || !next.findDefinition(ingredient.definitionId)
+                || !needed.emplace(ingredient.definitionId, ingredient.quantity).second)
+                return reject<void>(Error::Invalid, "invalid pending craft recipe");
+        }
+        std::set<std::string> seenItems;
+        for (const auto& input : craft.inputs) {
+            const auto item = next._items.find(input.itemId);
+            if (input.itemId.empty() || input.quantity == 0
+                || !seenItems.insert(input.itemId).second
+                || item == next._items.end()
+                || item->second.location.place != Place::Container
+                || item->second.location.ownerId != craft.sourceContainerId
+                || !needed.contains(item->second.definitionId))
+                return reject<void>(Error::Invalid, "invalid pending craft material");
+            auto& remaining = needed.at(item->second.definitionId);
+            if (input.quantity > remaining)
+                return reject<void>(Error::Invalid, "pending craft material exceeds recipe");
+            remaining -= input.quantity;
+            const std::uint64_t total = static_cast<std::uint64_t>(
+                next._reservedByItem[input.itemId]) + input.quantity;
+            if (total > item->second.quantity)
+                return reject<void>(Error::Invalid, "pending crafts oversubscribe an item");
+            next._reservedByItem[input.itemId] = static_cast<std::uint32_t>(total);
+        }
+        for (const auto& [_, remaining] : needed)
+            if (remaining != 0)
+                return reject<void>(Error::Invalid, "pending craft recipe not fully reserved");
+        next._reservations.emplace(request, craft);
+    }
     for (const auto& [request, receipt] : saved.completedMerges) {
         if (request.empty() || receipt.sourceItemId.empty()
             || receipt.targetItemId.empty()
@@ -595,8 +647,8 @@ Result<void> Store::restore(const Snapshot& saved)
     _completedTransfers.swap(next._completedTransfers);
     _completedCrafts.swap(next._completedCrafts);
     _completedMerges.swap(next._completedMerges);
-    _reservations.clear();
-    _reservedByItem.clear();
+    _reservations.swap(next._reservations);
+    _reservedByItem.swap(next._reservedByItem);
     _nextAbilityBindingId = next._nextAbilityBindingId;
     return {};
 }

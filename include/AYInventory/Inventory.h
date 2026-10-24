@@ -99,6 +99,21 @@ struct CraftReceipt {
     bool operator==(const CraftReceipt&) const = default;
 };
 
+struct ReservedCraftInput {
+    std::string itemId;
+    std::uint32_t quantity = 0;
+    bool operator==(const ReservedCraftInput&) const = default;
+};
+
+/// A pending request's exact material instances. Restoring them preserves
+/// which stack will be consumed when several stacks share a definition.
+struct PendingCraft {
+    Recipe recipe;
+    std::string sourceContainerId;
+    std::vector<ReservedCraftInput> inputs;
+    bool operator==(const PendingCraft&) const = default;
+};
+
 /// A completed stack merge and its immediate post-merge quantities. Exact
 /// retries succeed only while those quantities still describe the same
 /// items; mismatching later quantities make the old request stale.
@@ -126,6 +141,8 @@ struct Snapshot {
     std::map<std::string, std::string> completedTransfers;
     std::map<std::string, CraftReceipt> completedCrafts;
     std::map<std::string, MergeReceipt> completedMerges;
+    /// Schema v7 only. Ordinary snapshot() stays v6 and omits pending work.
+    std::map<std::string, PendingCraft> pendingCrafts;
 };
 
 /// Single-owner inventory state. Do not retain Item references across writes.
@@ -169,8 +186,9 @@ public:
     Result<void> removeEquipmentOwner(std::string_view id);
 
     /// Lock recipe inputs in a registered container without consuming them.
-    /// Pending reservations are runtime-only: saving cancels them implicitly,
-    /// leaving the original material counts in the persisted snapshot.
+    /// The ordinary v6 snapshot omits pending reservations, leaving original
+    /// material counts available after load. Use snapshotWithReservations()
+    /// when a game must resume an in-progress craft exactly.
     Result<void> reserveCraft(const Recipe& recipe,
                               std::string_view sourceContainerId,
                               std::string requestId);
@@ -187,6 +205,10 @@ public:
     [[nodiscard]] const Definition* findDefinition(std::string_view id) const;
     [[nodiscard]] std::optional<std::string> occupying(const Location& location) const;
     [[nodiscard]] Snapshot snapshot() const;
+    /// Opt into schema v7 to persist exact pending material reservations.
+    /// Restore validates every reserved instance and aggregate quantity before
+    /// publishing; the default snapshot() intentionally discards pending work.
+    [[nodiscard]] Snapshot snapshotWithReservations() const;
     Result<void> restore(const Snapshot& snapshot);
     /// Exchange complete states without allocation; used after an external
     /// world transaction has published a matching staged transfer.
@@ -225,13 +247,7 @@ private:
     std::map<std::string, Item> _items;
     std::set<std::string> _retiredItemIds;
     std::map<std::string, std::string> _completedTransfers;
-    struct ReservedInput { std::string itemId; std::uint32_t quantity = 0; };
-    struct Reservation {
-        Recipe recipe;
-        std::string sourceContainerId;
-        std::vector<ReservedInput> inputs;
-    };
-    std::map<std::string, Reservation> _reservations;
+    std::map<std::string, PendingCraft> _reservations;
     std::map<std::string, std::uint32_t> _reservedByItem;
     std::map<std::string, CraftReceipt> _completedCrafts;
     std::map<std::string, MergeReceipt> _completedMerges;

@@ -70,8 +70,11 @@ ctest --test-dir out/build/ayinventory --output-on-failure
 
 `reserveCraft(recipe, containerId, requestId)` 按物品定义锁定材料；
 `commitCraft` 一次性扣料并产生一个有稳定 ID 的输出实例，失败保持材料与预留；
-`cancelCraft` 释放预留。保存时待提交预留不入快照，材料仍在原槽；读档相当于取消。
-快照 schema v6 记录制作、合并收据、退役实例 ID 和配件归属，可读取 v2/v3/v4/v5 所有权存档。
+`cancelCraft` 释放预留。普通 `snapshot()` 仍生成 schema v6，待提交预留不入快照；
+读档相当于取消。长时制作需要继续时，显式调用 `snapshotWithReservations()` 生成
+schema v7：记录请求、配方与选中的材料实例及数量。`restore()` 在发布前校验配方、
+材料归属和所有预留的总量；不完整或超额的预留使整个恢复失败。v7 也保留制作、
+合并收据、退役实例 ID 和配件归属，并可读取 v2/v3/v4/v5/v6 所有权存档。
 需要直接建造时，`craftAndPlaceWorldItem` 在 Store 候选中预留并扣料，先让
 `IPlacementHost` 发布世界对象，再无分配交换候选 Store；空间检查或发布失败
 不会消耗材料。完成收据和世界物品 ID 同时持久化，重复调用只核验已发布对象。

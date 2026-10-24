@@ -437,6 +437,64 @@ void concurrentReservations()
           "fully consumed ingredient retired");
 }
 
+void pendingCraftsCanBeRestoredByExplicitSchemaSevenSnapshot()
+{
+    auto store = makeStore();
+    check(store.createItem({"wood-2", "wood", 3,
+                            {Place::Container, "bag", "d"}}), "second material stack");
+    auto recipe = campfire();
+    recipe.inputs.front().quantity = 6;
+    check(store.reserveCraft(recipe, "bag", "long-craft"), "reserve long craft");
+    const auto ordinary = store.snapshot();
+    check(ordinary.schemaVersion == 6 && ordinary.pendingCrafts.empty(),
+          "ordinary snapshot keeps compatibility behavior");
+    auto saved = store.snapshotWithReservations();
+    check(saved.schemaVersion == 7 && saved.pendingCrafts.size() == 1
+          && saved.pendingCrafts.at("long-craft").inputs.size() == 3,
+          "schema seven records exact material stacks");
+    auto loaded = makeStore();
+    check(loaded.restore(saved), "restore pending craft");
+    check(!loaded.transfer("wood-1", {Place::Container, "bag", "a"},
+                           {Place::Container, "chest", "a"}, "blocked-by-craft"),
+          "restored material remains reserved");
+    check(loaded.reserveCraft(recipe, "bag", "long-craft"),
+          "exact pending request retry survives restore");
+    const auto before = loaded.snapshotWithReservations();
+    auto corrupt = saved;
+    corrupt.pendingCrafts.at("long-craft").inputs.front().quantity = 99;
+    check(!loaded.restore(corrupt), "excess reserved quantity rejected");
+    check(loaded.snapshotWithReservations().pendingCrafts == before.pendingCrafts,
+          "bad reservation restore is atomic");
+    corrupt = saved;
+    corrupt.pendingCrafts.emplace("duplicate-job", corrupt.pendingCrafts.at("long-craft"));
+    check(!loaded.restore(corrupt), "oversubscribed concurrent jobs rejected");
+    corrupt = saved;
+    corrupt.schemaVersion = 6;
+    check(!loaded.restore(corrupt), "legacy schema cannot carry pending jobs");
+    check(loaded.commitCraft("long-craft", "long-output",
+                             {Place::Container, "bag", "c"}),
+          "resumed craft consumes original stack selection");
+    check(loaded.findItem("wood-1") == nullptr
+          && loaded.findItem("wood-2")->quantity == 2,
+          "restored craft spent exactly selected stacks");
+#ifdef AY_INVENTORY_JSON
+    auto encoded = encodeSnapshotJson(saved);
+    check(encoded, "encode pending craft JSON");
+    auto decoded = decodeSnapshotJson(*encoded);
+    check(decoded && decoded->pendingCrafts == saved.pendingCrafts,
+          "decode exact pending craft JSON");
+    auto fromJson = makeStore();
+    check(fromJson.createItem({"wood-2", "wood", 3,
+                               {Place::Container, "bag", "d"}}),
+          "restore catalog has second stack");
+    check(fromJson.restore(*decoded), "restore pending craft JSON");
+    check(fromJson.cancelCraft("long-craft"), "restored cancellation releases materials");
+    check(fromJson.transfer("wood-1", {Place::Container, "bag", "a"},
+                            {Place::Container, "chest", "a"}, "after-cancel"),
+          "restored cancellation permits transfer");
+#endif
+}
+
 void interactionAndPlacement()
 {
     auto store = makeStore();
@@ -575,6 +633,7 @@ int main()
         craftFailuresAndSaveBoundary();
         craftAcrossStacks();
         concurrentReservations();
+        pendingCraftsCanBeRestoredByExplicitSchemaSevenSnapshot();
         interactionAndPlacement();
         directCraftPlacementIsOneRecoverableHandoff();
         durablePickupCommitsOwnershipBeforeBestEffortWorldCleanup();
