@@ -31,7 +31,14 @@ store->transfer("sword-1", drop, bag, "pickup-request-1");
 需要 Ability 的物品在创建时由 Store 分配持久数值 `abilityBindingId`，不从字符串截断
 或哈希得到；删除后也不复用旧数值。
 `equippedProfiles(actorId)` 给 Host 一个只读同步输入；Host 在固定 Sim 边界把它映射到
-Ability/Stats，并负责撤销离开装备位的效果。定义的 `attachmentSlots` 可指定槽与
+Ability/Stats，并负责撤销离开装备位的效果。
+可选 `AYInventory::EquipmentProjection` 使用 `equippedProfiles` 在固定 Sim 边界
+同步 AYStats 修正和 AYAbility 选中装备：先在两份候选运行时中完成预检，再一次性
+交换发布。游戏提供稳定的 Stats modifier 身份/zone 工厂，并保持它为纯函数；
+适配器保留收起装备的弹药与冷却，跨角色装备时转移相同 Ability 实例，销毁后撤销。
+保存恢复时从暂存 Store、Stats、Ability 创建新的适配器再同步，不能在活动状态
+上边读档边应用。该可选目标不改变 Inventory Core 的依赖。
+定义的 `attachmentSlots` 可指定槽与
 可接受的配件定义；配件仍有独立实例 ID，通过 `Place::Attachment` 归属于父物品。
 主装备移动时整棵配件树随之移动；`equippedProfiles` 包含已装备树上的配件，
 `equipmentDelta(before, after, actorId)` 给出需撤销与新增的效果资料。Core 不把

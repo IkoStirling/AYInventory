@@ -91,6 +91,18 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   精确的 IPlacementHost。适配不隐式注册 Entity 组件、保存场景或实现游戏权限；调用者
   在 Sim 边界使用它，World/Store 卸载和恢复时重新注入当前实例。
 
+## 装备投影
+
+`EquipmentProjection` 是可选跨模块桥，Core 仍无 Stats/Ability 依赖。
+每个 actor 在串行 Sim 边界获取 Store 的完整装备剖面，游戏的纯 modifier 工厂
+把各个 stat bonus 映射到稳定唯一 handle 与合法 zone。桥接先在 Stats 和 Ability
+候选副本中验证全部更改：Stats 的 owned modifier 批量替换、Ability 的实例增加、
+跨角色所有权转移、选择和已销毁实例移除。Ability 先无分配交换候选，Stats 后
+无异常交换候选，最后发布桥内部账本；任何预检失败均不触及活动运行时。
+收起但仍存在的物品保留 Ability 弹药/冷却，复装不重建实例。游戏保持 actor
+选择的独占写入权，并在同一身份域内装配所有 actor；多个 actor 的 Store
+转移仍应由游戏在一个事务边界协调。读档时在暂存状态重建桥，重新投影。
+
 ## 后续
 
 交易、钱币、重量、掉落表、可变品质、装备词条和网络复制均由后续需求单独决定。
