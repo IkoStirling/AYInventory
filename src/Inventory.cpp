@@ -31,10 +31,19 @@ Result<Store> Store::create(std::uint32_t catalogVersion,
             if (slot.empty()) return reject<Store>(Error::Invalid, "empty equipment slot");
         for (const auto& bonus : definition.statBonuses)
             if (bonus.statId == 0) return reject<Store>(Error::Invalid, "zero stat ID");
+        for (const auto& [slot, accepted] : definition.attachmentSlots)
+            if (slot.empty() || accepted.empty() || accepted.contains(""))
+                return reject<Store>(Error::Invalid, "invalid attachment slot or accepted definition");
         const auto id = definition.id;
         if (!store._definitions.emplace(id, std::move(definition)).second)
             return reject<Store>(Error::Duplicate, "duplicate item definition: " + id);
     }
+    for (const auto& [_, definition] : store._definitions)
+        for (const auto& [slot, accepted] : definition.attachmentSlots)
+            for (const auto& childId : accepted)
+                if (!store._definitions.contains(childId))
+                    return reject<Store>(Error::Missing, "attachment slot '" + slot
+                        + "' references an unknown definition: " + childId);
     return store;
 }
 
@@ -108,6 +117,29 @@ Result<void> Store::validateItem(const Item& item,
             || !definition->second.equipSlots.contains(loc.slot)
             || item.quantity != 1)
             return reject<void>(Error::Incompatible, "item does not fit equipment slot");
+        break;
+    }
+    case Place::Attachment: {
+        const auto parent = _items.find(loc.ownerId);
+        if (parent == _items.end())
+            return reject<void>(Error::Missing, "attachment parent item is missing");
+        if (parent->second.quantity != 1)
+            return reject<void>(Error::Incompatible, "attachment parent must be one instance");
+        const auto& parentDefinition = _definitions.at(parent->second.definitionId);
+        const auto slot = parentDefinition.attachmentSlots.find(loc.slot);
+        if (slot == parentDefinition.attachmentSlots.end()
+            || !slot->second.contains(item.definitionId) || item.quantity != 1)
+            return reject<void>(Error::Incompatible, "part does not fit attachment slot");
+        std::set<std::string> ancestors;
+        auto current = loc.ownerId;
+        while (true) {
+            if (current == item.id || !ancestors.insert(current).second)
+                return reject<void>(Error::Incompatible, "attachment cycle");
+            const auto found = _items.find(current);
+            if (found == _items.end()
+                || found->second.location.place != Place::Attachment) break;
+            current = found->second.location.ownerId;
+        }
         break;
     }
     default:
@@ -228,8 +260,14 @@ Result<void> Store::merge(std::string_view sourceId, std::string_view targetId,
     if (quantity > maximum - target->second.quantity)
         return reject<void>(Error::Capacity, "target stack full");
     if (source->second.location.place == Place::Equipment
-        || target->second.location.place == Place::Equipment)
-        return reject<void>(Error::Incompatible, "cannot merge equipped items");
+        || target->second.location.place == Place::Equipment
+        || source->second.location.place == Place::Attachment
+        || target->second.location.place == Place::Attachment)
+        return reject<void>(Error::Incompatible, "cannot merge equipped or attached items");
+    for (const auto& [_, item] : _items)
+        if (item.location.place == Place::Attachment
+            && (item.location.ownerId == sourceId || item.location.ownerId == targetId))
+            return reject<void>(Error::Occupied, "cannot merge a parent with attached parts");
     if (quantity == source->second.quantity)
         _retiredItemIds.insert(source->first);
     target->second.quantity += quantity;
@@ -245,6 +283,9 @@ Result<void> Store::destroyItem(std::string_view itemId)
     const auto found = _items.find(std::string(itemId));
     if (found == _items.end())
         return reject<void>(Error::Missing, "item missing");
+    for (const auto& [_, item] : _items)
+        if (item.location.place == Place::Attachment && item.location.ownerId == itemId)
+            return reject<void>(Error::Occupied, "detach parts before destroying parent");
     _retiredItemIds.insert(found->first);
     _items.erase(found);
     return {};
@@ -436,7 +477,7 @@ Snapshot Store::snapshot() const
 Result<void> Store::restore(const Snapshot& saved)
 {
     if ((saved.schemaVersion != 2 && saved.schemaVersion != 3
-         && saved.schemaVersion != 4)
+         && saved.schemaVersion != 4 && saved.schemaVersion != 5)
         || saved.catalogVersion != _catalogVersion)
         return reject<void>(Error::ContentVersion, "inventory snapshot version mismatch");
     if (saved.schemaVersion == 2 && !saved.completedCrafts.empty())
@@ -449,12 +490,27 @@ Result<void> Store::restore(const Snapshot& saved)
         if (auto result = next.addContainer(container); !result) return result;
     for (const auto& actor : saved.actors)
         if (auto result = next.addEquipmentOwner(actor); !result) return result;
-    auto items = saved.items;
-    std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
-        return a.abilityBindingId < b.abilityBindingId;
-    });
-    for (const auto& item : items)
-        if (auto result = next.createItem(item); !result) return result;
+    std::map<std::string, Item> pending;
+    for (const auto& item : saved.items) {
+        if (saved.schemaVersion < 5 && item.location.place == Place::Attachment)
+            return reject<void>(Error::ContentVersion, "legacy snapshot cannot contain attachments");
+        if (!pending.emplace(item.id, item).second)
+            return reject<void>(Error::Duplicate, "duplicate item instance ID");
+    }
+    while (!pending.empty()) {
+        auto eligible = pending.end();
+        for (auto it = pending.begin(); it != pending.end(); ++it) {
+            if (it->second.location.place == Place::Attachment
+                && !next._items.contains(it->second.location.ownerId)) continue;
+            if (eligible == pending.end()
+                || it->second.abilityBindingId < eligible->second.abilityBindingId)
+                eligible = it;
+        }
+        if (eligible == pending.end())
+            return reject<void>(Error::Incompatible, "attachment parent missing or cyclic");
+        if (auto result = next.createItem(eligible->second); !result) return result;
+        pending.erase(eligible);
+    }
     for (const auto& id : saved.retiredItemIds) {
         if (id.empty() || next._items.contains(id))
             return reject<void>(Error::Invalid, "retired item ID is empty or still active");
@@ -471,7 +527,7 @@ Result<void> Store::restore(const Snapshot& saved)
     for (const auto& [request, receipt] : saved.completedCrafts) {
         if (request.empty() || receipt.outputItemId.empty()
             || receipt.destination.ownerId.empty()
-            || receipt.destination.place > Place::Equipment
+            || receipt.destination.place > Place::Attachment
             || (receipt.destination.place == Place::World
                 ? !receipt.destination.slot.empty()
                 : receipt.destination.slot.empty()))
@@ -496,12 +552,43 @@ std::vector<Store::EquippedProfile> Store::equippedProfiles(
 {
     std::vector<EquippedProfile> result;
     for (const auto& [id, item] : _items) {
-        if (item.location.place != Place::Equipment || item.location.ownerId != actorId)
-            continue;
+        const Item* current = &item;
+        std::string slotPath = item.location.slot;
+        while (current->location.place == Place::Attachment) {
+            const auto parent = _items.find(current->location.ownerId);
+            if (parent == _items.end()) { current = nullptr; break; }
+            current = &parent->second;
+            slotPath = current->location.slot + "/" + slotPath;
+        }
+        if (!current || current->location.place != Place::Equipment
+            || current->location.ownerId != actorId) continue;
         const auto& definition = _definitions.at(item.definitionId);
-        result.push_back({id, item.location.ownerId, item.location.slot,
+        result.push_back({id, std::string(actorId), std::move(slotPath),
                           item.abilityBindingId,
                           definition.abilityConfiguration, definition.statBonuses});
+    }
+    return result;
+}
+
+EquipmentDelta equipmentDelta(const Store& before, const Store& after,
+                               std::string_view actorId)
+{
+    EquipmentDelta result;
+    const auto oldProfiles = before.equippedProfiles(actorId);
+    const auto newProfiles = after.equippedProfiles(actorId);
+    std::map<std::string, Store::EquippedProfile> oldById;
+    std::map<std::string, Store::EquippedProfile> newById;
+    for (const auto& profile : oldProfiles) oldById.emplace(profile.itemId, profile);
+    for (const auto& profile : newProfiles) newById.emplace(profile.itemId, profile);
+    for (const auto& [id, oldProfile] : oldById) {
+        const auto fresh = newById.find(id);
+        if (fresh == newById.end() || fresh->second != oldProfile)
+            result.removals.push_back(oldProfile);
+    }
+    for (const auto& [id, freshProfile] : newById) {
+        const auto old = oldById.find(id);
+        if (old == oldById.end() || old->second != freshProfile)
+            result.additions.push_back(freshProfile);
     }
     return result;
 }

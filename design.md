@@ -3,7 +3,11 @@
 ## 不变量
 
 - 每个 `Item::id` 唯一、数量为正且不超过定义的 `maxStack`。一次实例只能处于
-  `World`、`Container`、`Equipment` 三者之一；`Location` 不是额外副本。
+  `World`、`Container`、`Equipment`、`Attachment` 四者之一；`Location` 不是额外副本。
+- 配件位置的 ownerId 是父物品实例 ID；父定义的槽必须接受子定义，父子数量
+  均为 1。同槽至多一件、禁止循环、父物品仍有配件时拒绝销毁或合并。
+  父物品在世界、容器、装备之间移动不重写后代归属；装备资料查询沿父链追踪
+  到角色装备槽，并生成稳定的层级槽路径。
 - 同一世界掉落实体、容器槽、装备槽至多容纳一个实例。容器和装备角色 ID 应使用
   `Entity::persistentId()` 或同等稳定内容 ID，不能使用会在 World 重建后改变的句柄。
 - 装备数量必须为 1，定义须允许目标槽。物品实例 ID 在游戏存档中持续稳定。
@@ -21,9 +25,11 @@
 
 ## 保存和接入
 
-`Store::snapshot()` 输出 schema v4 的值对象，携带 catalogVersion、Ability ID 水位、
+`Store::snapshot()` 输出 schema v5 的值对象，携带 catalogVersion、Ability ID 水位、
 退役实例 ID、转移和制作提交收据。`restore()` 接受 v2/v3 旧快照；旧快照未记录
 此前已消失实例的 ID，迁移后无法追溯那段历史。
+v4 快照也可读取；v2–v4 不允许含配件位置。v5 恢复先处理父实例，再处理子实例，
+缺失或循环的父链拒绝且不修改现有 Store。
 `restore()` 在临时 Store 中逐条校验定义、容量、归属与请求收据，成功后交换状态；
 退役 ID 与活动实例重叠、为空或在 JSON 中重复都会拒绝，失败不改变原 Store。
 `AYInventory::Json` 可选 target 序列化该值对象，解析有 8 MiB
@@ -41,6 +47,8 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
 单纯查询 profile 误称为自动集成。Inventory 内部转移是原子的；Ability/Stats
 同步目前是 Host 的独立提交，失败需在 staging 状态中重试或补偿，不能声称跨模块
 整体原子。具体属性 ID、计算区与装备规则由游戏定义。
+`equipmentDelta` 按实例 ID 比较变更前后的完整装备树，返回先撤销、后新增的
+确定性计划；Host 在一个 Sim 边界应用，仍负责 Ability/Stats 一侧的原子发布。
 
 ## 交互、制作与放置
 

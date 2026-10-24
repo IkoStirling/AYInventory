@@ -32,14 +32,22 @@ struct Definition {
     /// Existing AYAbility configuration ID; zero means no Ability binding.
     std::uint64_t abilityConfiguration = 0;
     /// Existing AYStats IDs and flat values, applied only while equipped.
-    struct StatBonus { std::uint64_t statId = 0; std::int64_t flat = 0; };
+    struct StatBonus {
+        std::uint64_t statId = 0;
+        std::int64_t flat = 0;
+        bool operator==(const StatBonus&) const = default;
+    };
     std::vector<StatBonus> statBonuses;
+    /// Item-local attachment slot -> accepted child definition IDs. Empty
+    /// accepted sets are invalid; games author compatibility, not Store.
+    std::map<std::string, std::set<std::string>> attachmentSlots;
 };
 
-enum class Place { World, Container, Equipment };
+enum class Place { World, Container, Equipment, Attachment };
 
 /// ownerId is a persistent Entity/content ID: drop object, container, or actor.
-/// World uses an empty slot; Container and Equipment use stable slot names.
+/// World uses an empty slot; Container/Equipment use stable slot names.
+/// Attachment uses the parent item instance ID as ownerId and its part slot.
 struct Location {
     Place place = Place::World;
     std::string ownerId;
@@ -94,7 +102,7 @@ struct CraftReceipt {
 /// Versioned value snapshot. Restore validates every item, its sole owner and
 /// retired-ID disjointness before swapping; invalid saves leave Store intact.
 struct Snapshot {
-    std::uint32_t schemaVersion = 4;
+    std::uint32_t schemaVersion = 5;
     std::uint32_t catalogVersion = 0;
     std::uint64_t nextAbilityBindingId = 1;
     std::vector<Container> containers;
@@ -109,7 +117,9 @@ struct Snapshot {
 
 /// Single-owner inventory state. Do not retain Item references across writes.
 /// Commands are atomic on validation failure. Transfer receipts and retired
-/// instance IDs survive Snapshot/restore for retry safety. Not thread-safe;
+    /// instance IDs survive Snapshot/restore for retry safety. Attached parts
+    /// remain owned by their parent instance when it moves; a parent cannot
+    /// be destroyed while parts are still attached. Not thread-safe;
 /// the tick owner serializes it.
 class Store {
 public:
@@ -119,7 +129,7 @@ public:
     Result<void> addContainer(Container container);
     Result<void> addEquipmentOwner(EquipmentOwner actor);
     /// Creates a fresh instance; an ID retired by destruction, full merge or
-    /// crafting may not be reused, including after a v4 snapshot restore.
+    /// crafting may not be reused, including after a v5 snapshot restore.
     Result<void> createItem(Item item);
 
     /// Transfer one entire instance. expectedSource prevents stale repeats;
@@ -130,7 +140,7 @@ public:
     Result<void> split(std::string_view itemId, std::uint32_t quantity,
                        std::string newItemId, Location destination);
     /// Merge same-definition stacks; source identity retires on full merge
-    /// and remains unavailable after a v4 snapshot restore.
+    /// and remains unavailable after a v5 snapshot restore.
     Result<void> merge(std::string_view sourceId, std::string_view targetId,
                        std::uint32_t quantity);
     /// Explicit removal retires the instance ID. A container or actor with
@@ -165,6 +175,8 @@ public:
 
     /// Read-only descriptor for a gameplay adapter: map the stable instance
     /// ID to AYAbility equipment and AYStats owned modifiers at a Sim boundary.
+    /// Attached descendants of equipped roots are included with a slash-
+    /// separated slot path, e.g. hand/scope.
     struct EquippedProfile {
         std::string itemId;
         std::string actorId;
@@ -172,6 +184,7 @@ public:
         std::uint64_t abilityBindingId = 0;
         std::uint64_t abilityConfiguration = 0;
         std::vector<Definition::StatBonus> statBonuses;
+        bool operator==(const EquippedProfile&) const = default;
     };
     [[nodiscard]] std::vector<EquippedProfile> equippedProfiles(
         std::string_view actorId) const;
@@ -203,5 +216,16 @@ private:
     std::map<std::string, CraftReceipt> _completedCrafts;
     [[nodiscard]] bool isReserved(std::string_view itemId) const;
 };
+
+/// Deterministic transition plan between two complete Store states. Apply all
+/// removals, then additions at one game-owned Sim boundary; the game's
+/// Ability/Stats adapter remains responsible for its own atomic publication.
+struct EquipmentDelta {
+    std::vector<Store::EquippedProfile> removals;
+    std::vector<Store::EquippedProfile> additions;
+};
+[[nodiscard]] EquipmentDelta equipmentDelta(const Store& before,
+                                             const Store& after,
+                                             std::string_view actorId);
 
 } // namespace ayt::inventory

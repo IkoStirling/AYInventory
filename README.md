@@ -31,14 +31,18 @@ store->transfer("sword-1", drop, bag, "pickup-request-1");
 需要 Ability 的物品在创建时由 Store 分配持久数值 `abilityBindingId`，不从字符串截断
 或哈希得到；删除后也不复用旧数值。
 `equippedProfiles(actorId)` 给 Host 一个只读同步输入；Host 在固定 Sim 边界把它映射到
-Ability/Stats，并负责撤销离开装备位的效果。Core 不把词条、经济或掉落规则写死。
+Ability/Stats，并负责撤销离开装备位的效果。定义的 `attachmentSlots` 可指定槽与
+可接受的配件定义；配件仍有独立实例 ID，通过 `Place::Attachment` 归属于父物品。
+主装备移动时整棵配件树随之移动；`equippedProfiles` 包含已装备树上的配件，
+`equipmentDelta(before, after, actorId)` 给出需撤销与新增的效果资料。Core 不把
+词条、经济或掉落规则写死。
 
 `snapshot()`/`restore()` 捕获已注册容器、装备角色、实例、已退役实例 ID、Ability ID 水位、转移与制作收据；恢复校验版本、
 定义引用、唯一归属和槽位后整体发布。可选 `AYInventory::Json` 提供版本化 JSON，
 可作为 T01 `WorldStateLedger` 的一个游戏选择的 payload。定义表由游戏随内容加载，
 不在存档中复制。
 销毁、整堆合并和制作耗尽会永久退役源实例 ID，旧转移收据不能把后来创建的物品
-误认成旧实例。schema v4 保存退役集合，仍可读取 v2/v3；旧存档没有历史退役信息，
+误认成旧实例。schema v5 保存配件归属和退役集合，仍可读取 v2/v3/v4；旧存档没有历史退役信息，
 恢复后只能从当时仍存在的实例开始保证此约束。
 
 独立验证（没有 nlohmann_json 时关闭 JSON target）：
@@ -52,7 +56,7 @@ ctest --test-dir out/build/ayinventory --output-on-failure
 `reserveCraft(recipe, containerId, requestId)` 按物品定义锁定材料；
 `commitCraft` 一次性扣料并产生一个有稳定 ID 的输出实例，失败保持材料与预留；
 `cancelCraft` 释放预留。保存时待提交预留不入快照，材料仍在原槽；读档相当于取消。
-快照 schema v4 记录制作收据和退役实例 ID，可读取 v2/v3 所有权存档。
+快照 schema v5 记录制作收据、退役实例 ID 和配件归属，可读取 v2/v3/v4 所有权存档。
 
 `WorldTransactions.h` 接收 Host 从 3D 射线/空间查询映射出的稳定对象 ID。
 `chooseFocus` 选最近候选，`activate` 在操作当下重验有效性与权限，完成拾取或返回可打开的容器 ID。

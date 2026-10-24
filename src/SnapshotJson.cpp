@@ -59,8 +59,14 @@ Result<std::set<std::string>> slots(const Json& data)
 Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
 {
     try {
+        if (snapshot.schemaVersion < 2 || snapshot.schemaVersion > 5)
+            return invalid<std::string>("unsupported inventory schema");
         if (snapshot.schemaVersion < 4 && !snapshot.retiredItemIds.empty())
             return invalid<std::string>("legacy inventory schema cannot encode retired IDs");
+        if (snapshot.schemaVersion < 5)
+            for (const auto& item : snapshot.items)
+                if (item.location.place == Place::Attachment)
+                    return invalid<std::string>("legacy inventory schema cannot encode attachments");
         Json root = {{"format", "AliyatInventory"},
                      {"schemaVersion", snapshot.schemaVersion},
                      {"catalogVersion", snapshot.catalogVersion},
@@ -114,18 +120,16 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
         for (const char* key : {"containers", "actors", "items", "transfers"})
             if (!root.contains(key) || !root.at(key).is_array())
                 return invalid<Snapshot>(std::string("invalid ") + key + " array");
-        if ((snapshot.schemaVersion == 3
-             && (!root.contains("crafts") || !root.at("crafts").is_array()))
-            || (snapshot.schemaVersion == 4
+        if ((snapshot.schemaVersion >= 3
                 && (!root.contains("crafts") || !root.at("crafts").is_array()))
             || (root.contains("crafts") && !root.at("crafts").is_array()))
             return invalid<Snapshot>("invalid crafts array");
-        if ((snapshot.schemaVersion == 4
+        if ((snapshot.schemaVersion >= 4
              && (!root.contains("retiredItems")
                  || !root.at("retiredItems").is_array()))
             || (snapshot.schemaVersion < 4 && root.contains("retiredItems")))
             return invalid<Snapshot>("invalid retired items array");
-        if (snapshot.schemaVersion == 4) {
+        if (snapshot.schemaVersion >= 4) {
             for (const auto& value : root["retiredItems"]) {
                 if (!value.is_string())
                     return invalid<Snapshot>("retired item ID must be string");
@@ -162,8 +166,11 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
                 || !u32(value, "place", place)
                 || !text(value, "owner", entry.location.ownerId)
                 || !text(value, "slot", entry.location.slot)
-                || place > static_cast<std::uint32_t>(Place::Equipment))
+                || place > static_cast<std::uint32_t>(Place::Attachment))
                 return invalid<Snapshot>("invalid item record");
+            if (snapshot.schemaVersion < 5
+                && place == static_cast<std::uint32_t>(Place::Attachment))
+                return invalid<Snapshot>("legacy inventory item has attachment location");
             entry.location.place = static_cast<Place>(place);
             snapshot.items.push_back(std::move(entry));
         }
@@ -184,7 +191,7 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
                 || !u32(value, "place", place)
                 || !text(value, "owner", receipt.destination.ownerId)
                 || !text(value, "slot", receipt.destination.slot)
-                || place > static_cast<std::uint32_t>(Place::Equipment)
+                || place > static_cast<std::uint32_t>(Place::Attachment)
                 || request.empty() || receipt.outputItemId.empty()
                 || receipt.destination.ownerId.empty())
                 return invalid<Snapshot>("invalid craft receipt");

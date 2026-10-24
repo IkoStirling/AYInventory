@@ -99,10 +99,13 @@ void restoreAndCorruption()
     check(store.createItem({"sword", "iron-sword", 1, drop}).has_value(), "item");
     check(store.transfer("sword", drop, chestA, "pickup").has_value(), "transfer");
     auto saved = store.snapshot();
-    check(saved.schemaVersion == 4 && saved.nextAbilityBindingId == 2,
+    check(saved.schemaVersion == 5 && saved.nextAbilityBindingId == 2,
           "Ability binding allocator persisted");
     auto restored = makeStore();
     check(restored.restore(saved).has_value(), "snapshot restore");
+    auto version4 = saved;
+    version4.schemaVersion = 4;
+    check(restored.restore(version4).has_value(), "v4 ownership snapshot remains readable");
     check(restored.findItem("sword")->location == chestA, "restored owner");
     check(restored.findItem("sword")->abilityBindingId == 1,
           "Ability binding identity restored");
@@ -226,6 +229,79 @@ void fullMergeRetiresSourceIdentity()
     check(!store.createItem({"stack-source", "potion", 1, first}),
           "merged instance ID cannot be reused");
 }
+
+void attachedPartsFollowEquipmentAndRestore()
+{
+    Definition frame;
+    frame.id = "frame";
+    frame.equipSlots = {"hand"};
+    frame.abilityConfiguration = 100;
+    frame.attachmentSlots = {{"optic", {"scope"}}, {"rail", {"rail"}}};
+    Definition scope;
+    scope.id = "scope";
+    scope.statBonuses.push_back({12, 3});
+    scope.attachmentSlots = {{"lens", {"lens"}}};
+    Definition rail;
+    rail.id = "rail";
+    Definition lens;
+    lens.id = "lens";
+    lens.statBonuses.push_back({13, 2});
+    auto created = Store::create(7, {frame, scope, rail, lens});
+    check(created.has_value(), "part catalog");
+    auto store = std::move(*created);
+    check(store.addContainer({"bag", {"a", "b", "c"}}).has_value(), "part bag");
+    check(store.addEquipmentOwner({"hero", {"hand"}}).has_value(), "part actor");
+    const Location frameInBag{Place::Container, "bag", "a"};
+    const Location scopeInBag{Place::Container, "bag", "b"};
+    const Location frameEquipped{Place::Equipment, "hero", "hand"};
+    const Location scopeAttached{Place::Attachment, "frame-1", "optic"};
+    check(store.createItem({"frame-1", "frame", 1, frameInBag}).has_value(), "frame");
+    check(store.createItem({"scope-1", "scope", 1, scopeInBag}).has_value(), "scope");
+    check(store.createItem({"lens-1", "lens", 1,
+                            {Place::Attachment, "scope-1", "lens"}}).has_value(), "lens");
+    check(!store.createItem({"wrong", "rail", 1, scopeAttached}),
+          "attachment compatibility enforced");
+    check(store.transfer("scope-1", scopeInBag, scopeAttached, "attach-optic").has_value(),
+          "attach part");
+    check(!store.transfer("frame-1", frameInBag,
+                          {Place::Attachment, "scope-1", "lens"}, "cycle"),
+          "ancestor cycle rejected");
+    check(!store.destroyItem("frame-1"), "cannot destroy attached parent");
+    const Store beforeEquip = store;
+    check(store.transfer("frame-1", frameInBag, frameEquipped, "equip-frame").has_value(),
+          "equip assembly");
+    const auto equipPlan = equipmentDelta(beforeEquip, store, "hero");
+    check(equipPlan.removals.empty() && equipPlan.additions.size() == 3,
+          "part effects enter together at Sim boundary");
+    const auto profiles = store.equippedProfiles("hero");
+    check(profiles.size() == 3, "equipped assembly exposes all profiles");
+    check(profiles.at(0).itemId == "frame-1" && profiles.at(0).slot == "hand"
+          && profiles.at(0).abilityConfiguration == 100, "root profile");
+    check(profiles.at(1).itemId == "lens-1"
+          && profiles.at(1).slot == "hand/optic/lens", "nested part profile");
+    check(profiles.at(2).itemId == "scope-1"
+          && profiles.at(2).slot == "hand/optic", "direct part profile");
+    const auto noChange = equipmentDelta(store, store, "hero");
+    check(noChange.removals.empty() && noChange.additions.empty(),
+          "unchanged assembly emits no effect updates");
+    const auto saved = store.snapshot();
+    auto restored = Store::create(7, {frame, scope, rail, lens});
+    check(restored.has_value() && restored->restore(saved).has_value(), "part snapshot restore");
+    check(restored->equippedProfiles("hero").size() == 3, "restored assembly profiles");
+    auto broken = saved;
+    for (auto& item : broken.items)
+        if (item.id == "scope-1") item.location.ownerId = "missing";
+    check(!restored->restore(broken), "missing parent rejected");
+    check(restored->equippedProfiles("hero").size() == 3,
+          "invalid restore preserves assembly");
+#ifdef AY_INVENTORY_JSON
+    const auto encoded = encodeSnapshotJson(saved);
+    check(encoded.has_value(), "part JSON encode");
+    const auto decoded = decodeSnapshotJson(*encoded);
+    check(decoded.has_value() && restored->restore(*decoded).has_value(),
+          "part JSON roundtrip");
+#endif
+}
 } // namespace
 
 int main()
@@ -237,6 +313,7 @@ int main()
         abilityBindingSurvivesSplit();
         retiredInstanceIdsCannotImpersonateOldTransfers();
         fullMergeRetiresSourceIdentity();
+        attachedPartsFollowEquipmentAndRestore();
         std::cout << "AYInventory: all ownership tests passed\n";
         return 0;
     } catch (const std::exception& error) {
