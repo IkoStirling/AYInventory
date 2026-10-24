@@ -74,6 +74,10 @@ ctest --test-dir out/build/ayinventory --output-on-failure
 
 `WorldTransactions.h` 接收 Host 从 3D 射线/空间查询映射出的稳定对象 ID。
 `chooseFocus` 选最近候选，`activate` 在操作当下重验有效性与权限，完成拾取或返回可打开的容器 ID。
+立即落盘的拾取可用 `activatePickupDurable`：游戏以 `PickupSave` 将候选 Store 与
+世界对象墓碑写入同一失败原子的槽；保存成功即提交所有权。实体删除若失败，
+结果仍表示已提交，并以 `cleanupPending` 提醒后续重试清理。`ScenePhysicsHost3D`
+提供当前 World 中的幂等清理，旧射线焦点不能再次取出已提交物品。
 `placeWorldItem` 先暂存所有权转移，调用 Host 空间检查和对象发布；发布成功后才切换 Store。
 需要立即保存时可改用 `placeWorldItemDurable` 或 `craftAndPlaceWorldItemDurable`：
 游戏的 `PlacementSave` 回调把候选 Store 与放置对象记录写入同一存档槽，失败时

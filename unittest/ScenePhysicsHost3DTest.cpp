@@ -217,6 +217,17 @@ void run()
     check(craftAndPlaceWorldItem(store, host, recipe, "bag", "build-1",
                                  "campfire-1", crafted), "real host retry verifies published object");
     check(query.rayCalls >= 3 && query.overlapCalls >= 2, "live queries used");
+    const InteractionCandidate committedPickup{InteractionCandidate::Kind::Pickup,
+        craftedId, "campfire-1", 1.0};
+    check(!host.cleanupCommittedPickup(committedPickup),
+          "cleanup refuses World object while Store still owns it there");
+    check(store.transfer("campfire-1", {Place::World, craftedId, {}}, bag,
+                         "committed-pickup"), "commit pickup ownership first");
+    check(host.cleanupCommittedPickup(committedPickup),
+          "committed pickup removes leftover Scene projection");
+    check(world.findEntityByPersistentId(craftedId) == nullptr
+          && host.cleanupCommittedPickup(committedPickup),
+          "cleanup is idempotent after World removal");
 }
 } // namespace
 

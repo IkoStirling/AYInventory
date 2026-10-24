@@ -149,6 +149,28 @@ Result<void> ScenePhysicsHost3D::consumeWorldPickup(
     return {};
 }
 
+Result<void> ScenePhysicsHost3D::cleanupCommittedPickup(
+    const InteractionCandidate& candidate)
+{
+    if (candidate.kind != InteractionCandidate::Kind::Pickup
+        || !validEntityId(candidate.objectId))
+        return fail<void>(Error::Invalid, "invalid committed pickup identity");
+    if (_store.occupying({Place::World, candidate.objectId, {}}))
+        return fail<void>(Error::Stale, "world location still owns an item");
+    auto* entity = _world.findEntityByPersistentId(candidate.objectId);
+    if (!entity) return {};
+    if (!entity->ownedEntities().empty() || !entity->spatialChildren().empty()
+        || !_world.canDestroyEntity(entity))
+        return fail<void>(Error::Stale, "committed pickup projection cannot be removed alone");
+    try { _world.destroyEntity(entity); }
+    catch (const std::exception&) {
+        return fail<void>(Error::Stale, "committed pickup cleanup failed");
+    } catch (...) {
+        return fail<void>(Error::Stale, "committed pickup cleanup threw");
+    }
+    return {};
+}
+
 Result<void> ScenePhysicsHost3D::verifyPublished(
     const PlacementRequest& request, const Item& item)
 {

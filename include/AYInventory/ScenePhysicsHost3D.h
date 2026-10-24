@@ -22,7 +22,7 @@ struct InteractionView3D {
 /// The caller supplies the current actor view and game permission rule. World
 /// object IDs must be canonical 32-digit Entity persistent IDs. Keep the
 /// borrowed World, Store and query alive; use only on their owning Sim thread.
-class ScenePhysicsHost3D final : public IInteractionHost,
+class ScenePhysicsHost3D final : public IDurablePickupHost,
                                  public IDurablePlacementHost {
 public:
     using ViewProvider = std::function<Result<InteractionView3D>(std::string_view actorId)>;
@@ -41,6 +41,10 @@ public:
     Result<void> authorize(const InteractionCandidate& candidate,
                            std::string_view actorId) override;
     Result<void> consumeWorldPickup(const InteractionCandidate& candidate) override;
+    /// Idempotently remove the residual Entity after a durable Store pickup.
+    /// A World location with any current item is never cleaned up.
+    Result<void> cleanupCommittedPickup(
+        const InteractionCandidate& candidate) override;
 
     /// The current 3D oriented box query tests the authored footprint at
     /// prepare and publish. Layers and permission policy remain game supplied.

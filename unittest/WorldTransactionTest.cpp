@@ -70,6 +70,78 @@ struct InteractionHost final : IInteractionHost {
     }
 };
 
+struct DurableInteractionHost final : IDurablePickupHost {
+    bool worldPresent = true;
+    bool consumeSucceeds = false;
+    bool cleanupSucceeds = false;
+    int consumeCalls = 0;
+    int cleanupCalls = 0;
+    Result<void> validateCurrent(const InteractionCandidate&,
+                                 std::string_view) override { return {}; }
+    Result<void> authorize(const InteractionCandidate&,
+                           std::string_view) override { return {}; }
+    Result<void> consumeWorldPickup(const InteractionCandidate&) override {
+        ++consumeCalls;
+        if (!consumeSucceeds)
+            return std::unexpected(Diagnostic{Error::Stale, "world removal failed"});
+        worldPresent = false;
+        return {};
+    }
+    Result<void> cleanupCommittedPickup(const InteractionCandidate&) override {
+        ++cleanupCalls;
+        if (!cleanupSucceeds)
+            return std::unexpected(Diagnostic{Error::Stale, "cleanup still pending"});
+        worldPresent = false;
+        return {};
+    }
+};
+
+void durablePickupCommitsOwnershipBeforeBestEffortWorldCleanup()
+{
+    auto store = makeStore();
+    const Location bag{Place::Container, "bag", "a"};
+    const Location drop{Place::World, "scene/durable-drop", {}};
+    const Location chest{Place::Container, "chest", "a"};
+    check(store.transfer("wood-1", bag, drop, "seed-drop"), "seed world drop");
+    const InteractionCandidate pickup{InteractionCandidate::Kind::Pickup,
+        "scene/durable-drop", "wood-1", 1.0};
+    DurableInteractionHost host;
+    int saves = 0;
+    const PickupSave rejected = [&](const Store& candidate,
+                                    const InteractionCandidate& target) {
+        ++saves;
+        check(target == pickup && candidate.findItem("wood-1")->location == chest
+            && store.findItem("wood-1")->location == drop,
+            "save sees candidate Store and world tombstone target");
+        return false;
+    };
+    check(!activatePickupDurable(store, host, pickup, "player", chest,
+                                 "durable-pickup", rejected),
+          "failed save refuses pickup");
+    check(saves == 1 && host.consumeCalls == 0
+        && store.findItem("wood-1")->location == drop,
+        "failed save leaves live ownership and World untouched");
+    const PickupSave accepted = [&](const Store& candidate,
+                                    const InteractionCandidate& target) {
+        ++saves;
+        return target == pickup && candidate.findItem("wood-1")->location == chest;
+    };
+    const auto committed = activatePickupDurable(store, host, pickup, "player",
+        chest, "durable-pickup", accepted);
+    check(committed && committed->cleanupPending && host.worldPresent
+        && store.findItem("wood-1")->location == chest && saves == 2,
+        "cleanup failure is reported after authoritative pickup commit");
+    host.cleanupSucceeds = true;
+    const auto retried = activatePickupDurable(store, host, pickup, "player",
+        chest, "durable-pickup", accepted);
+    check(retried && !retried->cleanupPending && !host.worldPresent
+        && saves == 2 && host.consumeCalls == 1 && host.cleanupCalls == 2,
+        "exact retry only reconciles the committed World projection");
+    check(!activatePickupDurable(store, host, pickup, "player", chest,
+                                 "different-request", accepted),
+          "changed request cannot reuse committed ownership");
+}
+
 struct PlacementHost final : IDurablePlacementHost {
     bool clear = true;
     bool canPublish = true;
@@ -505,6 +577,7 @@ int main()
         concurrentReservations();
         interactionAndPlacement();
         directCraftPlacementIsOneRecoverableHandoff();
+        durablePickupCommitsOwnershipBeforeBestEffortWorldCleanup();
         durablePlacementSavesCandidateOrRetractsWorld();
         throwingHostsDoNotPublishHalfTransactions();
         std::cout << "AYInventory: world transactions passed\n";

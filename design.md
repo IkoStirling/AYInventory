@@ -56,6 +56,11 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   以距离及稳定对象 ID 决定焦点。`activate` 不信任跨帧焦点，要求 Host 当下复核命中、
   距离和权限。拾取先复制 Store 做转移校验，调用 Host 原子移除世界掉落，然后交换
   Store；容器打开只返回稳定容器 ID。具体盗窃、锁具、UI 归游戏处理。
+- `activatePickupDurable` 在同样的当场复核后先把候选 Store 和世界对象墓碑写入
+  一个失败原子的游戏存档槽，再尝试删除实体、以无异常交换提交 Store。
+  成功保存后，实体清理失败不能回退已提交的持久所有权；返回成功并带
+  `cleanupPending`，原请求重试只执行幂等清理，不再保存或转移。
+  Scene 适配器清理前确认原 World 位置已无物品，避免误删新对象。
 - 配方只声明输入定义与数量、输出定义与数量。`reserveCraft` 在一个注册容器中按实例 ID
   顺序选择可用材料；预留物品在提交/取消前禁止移动、拆分、合并和销毁，其他配方不能
   超额预留。`commitCraft` 在 Store 副本中扣料、建输出和记收据，所有约束通过后交换；
@@ -76,8 +81,8 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   立即撤销刚发布的对象，Store 候选不交换。保存成功后无分配交换 Store 并
   释放撤销令牌。`ScenePhysicsHost3D` 只允许撤销紧前一次未提交的发布，避免
   误删先前对象。旧槽必须在保存失败时保持原样；崩溃恢复须用成功写入的同一
-  槽重建 World 和 Store。该路径不自动保存整个 Scene，拾取的即时落盘回滚
-  仍由游戏提供世界侧逆操作或在下一静止保存点处理。
+  槽重建 World 和 Store。该路径不自动保存整个 Scene。拾取的立即落盘使用
+  上述保存优先路径；游戏必须把墓碑与候选 Store 同槽提交。
 - `ScenePhysicsHost3D` 接受当前 Scene 的 `World&`、`IPhysicsQuery&`、`Store&`，
   以及游戏拥有的当前视线和权限回调。焦点和激活各自发起当前 raycast，按有效 3D
   刚体句柄解析 Entity，再用 `persistentId` 对应 Store 的世界物品或容器。

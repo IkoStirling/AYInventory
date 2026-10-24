@@ -40,6 +40,15 @@ public:
     virtual Result<void> consumeWorldPickup(const InteractionCandidate& candidate) = 0;
 };
 
+/// Optional durable pickup cleanup. After ownership has been saved and
+/// published, remove a still-present World projection by persistent ID.
+/// Return success if it is already absent; do not restore World ownership.
+class IDurablePickupHost : public IInteractionHost {
+public:
+    virtual Result<void> cleanupCommittedPickup(
+        const InteractionCandidate& candidate) = 0;
+};
+
 struct Activation {
     InteractionCandidate::Kind kind;
     std::string objectId;
@@ -55,6 +64,27 @@ Result<Activation> activate(Store& store, IInteractionHost& host,
                             std::string_view actorId,
                             std::optional<Location> pickupDestination,
                             std::string requestId);
+
+struct DurablePickupResult {
+    Activation activation;
+    /// Authoritative ownership and save have committed. The World projection
+    /// could not be removed yet; retry with the same request ID or reconcile
+    /// the saved tombstone after load. This is not a transfer failure.
+    bool cleanupPending = false;
+};
+
+/// Persist the candidate Store and an object tombstone as one failure-atomic
+/// game save. A false/throwing callback leaves live state untouched. After a
+/// successful save, the Store commits even if World cleanup fails; the result
+/// explicitly reports pending cleanup. Exact retries never save or transfer
+/// again and may retry cleanup. Use at a serialized quiescent Sim boundary.
+using PickupSave = std::function<bool(const Store& candidate,
+                                      const InteractionCandidate& pickup)>;
+[[nodiscard]] Result<DurablePickupResult> activatePickupDurable(
+    Store& store, IDurablePickupHost& host,
+    const InteractionCandidate& candidate, std::string_view actorId,
+    const Location& destination, std::string requestId,
+    const PickupSave& save);
 
 struct PlacementPose {
     std::array<double, 3> position{};

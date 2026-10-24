@@ -143,6 +143,57 @@ Result<Activation> activate(Store& store, IInteractionHost& host,
     return result;
 }
 
+Result<DurablePickupResult> activatePickupDurable(
+    Store& store, IDurablePickupHost& host,
+    const InteractionCandidate& candidate, std::string_view actorId,
+    const Location& destination, std::string requestId,
+    const PickupSave& save)
+{
+    if (candidate.kind != InteractionCandidate::Kind::Pickup
+        || actorId.empty() || candidate.objectId.empty()
+        || candidate.subjectId.empty() || !std::isfinite(candidate.distance)
+        || candidate.distance < 0.0 || destination.place != Place::Container
+        || !save)
+        return reject<DurablePickupResult>(Error::Invalid,
+            "invalid durable pickup target, destination or save callback");
+    const auto* item = store.findItem(candidate.subjectId);
+    if (!item) return reject<DurablePickupResult>(Error::Missing, "pickup item missing");
+    const Location source{Place::World, candidate.objectId, {}};
+    Store staged = store;
+    if (auto moved = staged.transfer(candidate.subjectId, source, destination,
+                                     std::move(requestId)); !moved)
+        return std::unexpected(moved.error());
+    Activation activation{candidate.kind, candidate.objectId,
+                          candidate.subjectId};
+    const auto cleanup = [&]() noexcept {
+        try { return host.cleanupCommittedPickup(candidate).has_value(); }
+        catch (...) { return false; }
+    };
+    if (item->location == destination)
+        return DurablePickupResult{std::move(activation), !cleanup()};
+    if (auto valid = invokeHost([&] {
+            return host.validateCurrent(candidate, actorId);
+        }, "Interaction validation"); !valid)
+        return std::unexpected(valid.error());
+    if (auto allowed = invokeHost([&] {
+            return host.authorize(candidate, actorId);
+        }, "Interaction authorization"); !allowed)
+        return std::unexpected(allowed.error());
+    auto saved = invokeHost([&]() -> Result<void> {
+        if (!save(staged, candidate))
+            return reject<void>(Error::Stale, "pickup save rejected candidate");
+        return {};
+    }, "Pickup save");
+    if (!saved) return std::unexpected(saved.error());
+    // The durable candidate is authoritative now. Cleanup is best effort;
+    // never report it as a transfer failure or leave the live Store behind.
+    bool consumed = false;
+    try { consumed = host.consumeWorldPickup(candidate).has_value(); }
+    catch (...) {}
+    store.swap(staged);
+    return DurablePickupResult{std::move(activation), !consumed && !cleanup()};
+}
+
 Result<void> placeWorldItem(Store& store, IPlacementHost& host,
                             std::string_view itemId, const Location& source,
                             PlacementRequest request, std::string requestId)
