@@ -68,6 +68,77 @@ void catalogAndTransfers()
     check(store.findItem("sword-1")->location == equipped, "single owner");
 }
 
+void batchTransferSwapsAndRestoresReceipt()
+{
+    auto store = makeStore();
+    const Location chestA{Place::Container, "chest", "a"};
+    const Location chestB{Place::Container, "chest", "b"};
+    const Location equipped{Place::Equipment, "player", "hand"};
+    const Location world{Place::World, "drop", {}};
+    check(store.createItem({"sword", "iron-sword", 1, chestA}).has_value(), "batch sword");
+    check(store.createItem({"potion", "potion", 2, chestB}).has_value(), "batch potion");
+    const std::vector<TransferMove> swap{
+        {"sword", chestA, chestB}, {"potion", chestB, chestA}};
+    check(store.transferBatch(swap, "swap-1").has_value(), "occupied slots can swap atomically");
+    check(store.findItem("sword")->location == chestB
+          && store.findItem("potion")->location == chestA,
+          "both owners changed together");
+    const std::vector<TransferMove> reversed{swap[1], swap[0]};
+    check(store.transferBatch(reversed, "swap-1").has_value(), "move order does not change retry");
+    check(!store.transferBatch(swap, "different-1"), "stale source rejected");
+    const std::vector<TransferMove> invalid{
+        {"sword", chestB, equipped}, {"potion", chestA, equipped}};
+    check(!store.transferBatch(invalid, "invalid-1"), "invalid final occupancy rejected");
+    check(store.findItem("sword")->location == chestB
+          && store.findItem("potion")->location == chestA
+          && !store.snapshot().completedTransfers.contains("invalid-1"),
+          "failed batch publishes no partial owner or receipt");
+    const std::vector<TransferMove> fromWorld{{"potion", chestA, world}};
+    check(!store.transferBatch(fromWorld, "world-1"), "world endpoint requires Host");
+    const std::vector<TransferMove> duplicate{swap[0], swap[0]};
+    check(!store.transferBatch(duplicate, "duplicate-1"), "duplicate item rejected");
+
+    const auto saved = store.snapshot();
+    auto loaded = makeStore();
+    check(loaded.restore(saved).has_value(), "batch receipt restored");
+    check(loaded.transferBatch(reversed, "swap-1").has_value(), "retry survives snapshot");
+#ifdef AY_INVENTORY_JSON
+    const auto encoded = encodeSnapshotJson(saved);
+    check(encoded.has_value(), "batch snapshot JSON encode");
+    const auto decoded = decodeSnapshotJson(*encoded);
+    check(decoded.has_value() && loaded.restore(*decoded).has_value(), "batch JSON restore");
+    check(loaded.transferBatch(swap, "swap-1").has_value(), "retry survives JSON");
+#endif
+    check(loaded.transfer("sword", chestB, equipped, "equip-later").has_value(),
+          "later transfer succeeds");
+    check(!loaded.transferBatch(swap, "swap-1"),
+          "batch retry is stale after later ownership change");
+}
+
+void batchTransferKeepsPendingReservations()
+{
+    auto store = makeStore();
+    const Location chestA{Place::Container, "chest", "a"};
+    const Location chestB{Place::Container, "chest", "b"};
+    const Location equipped{Place::Equipment, "player", "hand"};
+    check(store.createItem({"sword", "iron-sword", 1, chestA}).has_value(), "reserved sword");
+    check(store.createItem({"potion", "potion", 2, chestB}).has_value(), "reserved potion");
+    const Recipe recipe{"brew", {{"potion", 1}}, "potion", 1};
+    check(store.reserveCraft(recipe, "chest", "brew-1").has_value(), "reserve material");
+    const std::vector<TransferMove> equip{{"sword", chestA, equipped}};
+    check(store.transferBatch(equip, "batch-equip").has_value(),
+          "move unrelated equipment with reservation active");
+    check(store.snapshotWithReservations().pendingCrafts.contains("brew-1"),
+          "batch preserves pending craft");
+    const std::vector<TransferMove> moveReserved{{"potion", chestB, chestA}};
+    check(!store.transferBatch(moveReserved, "reserved-move"),
+          "reserved material cannot move in batch");
+    check(store.findItem("potion")->location == chestB
+          && !store.snapshot().completedTransfers.contains("reserved-move"),
+          "reserved move leaves ownership and receipt untouched");
+    check(store.cancelCraft("brew-1").has_value(), "reservation remains cancelable");
+}
+
 void stacksAndOwnerDestruction()
 {
     auto store = makeStore();
@@ -370,6 +441,8 @@ int main()
 {
     try {
         catalogAndTransfers();
+        batchTransferSwapsAndRestoresReceipt();
+        batchTransferKeepsPendingReservations();
         stacksAndOwnerDestruction();
         restoreAndCorruption();
         abilityBindingSurvivesSplit();

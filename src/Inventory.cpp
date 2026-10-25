@@ -225,6 +225,58 @@ Result<void> Store::transfer(std::string_view itemId,
     return {};
 }
 
+Result<void> Store::transferBatch(std::span<const TransferMove> moves,
+                                  std::string requestId)
+{
+    if (requestId.empty() || moves.empty() || moves.size() > 256)
+        return reject<void>(Error::Invalid, "batch transfer needs a request and 1..256 moves");
+    std::map<std::string, TransferMove> ordered;
+    for (const auto& move : moves) {
+        if (move.itemId.empty() || move.expectedSource == move.destination
+            || move.expectedSource.place == Place::World
+            || move.destination.place == Place::World)
+            return reject<void>(Error::Invalid, "batch move has invalid identity or World endpoint");
+        if (!ordered.emplace(move.itemId, move).second)
+            return reject<void>(Error::Duplicate, "batch repeats an item instance");
+    }
+    std::string fingerprint = "batch:";
+    appendField(fingerprint, std::to_string(ordered.size()));
+    for (const auto& [id, move] : ordered)
+        appendField(fingerprint, transferFingerprint(id, move.expectedSource,
+                                                    move.destination));
+    if (const auto receipt = _completedTransfers.find(requestId);
+        receipt != _completedTransfers.end()) {
+        if (receipt->second != fingerprint)
+            return reject<void>(Error::Duplicate, "request ID reused for another transfer");
+        for (const auto& [id, move] : ordered) {
+            const auto item = _items.find(id);
+            if (item == _items.end() || item->second.location != move.destination)
+                return reject<void>(Error::Stale, "batch transfer was superseded");
+        }
+        return {};
+    }
+    Store staged = *this;
+    for (const auto& [id, move] : ordered) {
+        const auto item = _items.find(id);
+        if (item == _items.end())
+            return reject<void>(Error::Missing, "batch item is missing");
+        if (item->second.location != move.expectedSource)
+            return reject<void>(Error::Stale, "batch item source changed");
+        if (isReserved(id))
+            return reject<void>(Error::Occupied, "batch item has reserved crafting units");
+        staged._items.at(id).location = move.destination;
+    }
+    staged._completedTransfers.emplace(std::move(requestId), std::move(fingerprint));
+    // Rebuild from the complete candidate so all destination occupancy,
+    // equipment rules and attachment ancestry are checked together. Use v7
+    // here even when normal saves use v6: pending reservations must survive.
+    Store checked = *this;
+    if (auto valid = checked.restore(staged.snapshotWithReservations()); !valid)
+        return valid;
+    swap(checked);
+    return {};
+}
+
 Result<void> Store::split(std::string_view itemId, std::uint32_t quantity,
                           std::string newItemId, Location destination)
 {

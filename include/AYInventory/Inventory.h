@@ -66,6 +66,15 @@ struct Item {
     bool operator==(const Item&) const = default;
 };
 
+/// One ownership move within registered containers/equipment/attachments.
+/// World projections require the separate WorldTransactions Host boundary.
+struct TransferMove {
+    std::string itemId;
+    Location expectedSource;
+    Location destination;
+    bool operator==(const TransferMove&) const = default;
+};
+
 struct Container {
     std::string id;
     std::set<std::string> slots;
@@ -166,6 +175,12 @@ public:
     /// requestId makes exact retries idempotent, including after load.
     Result<void> transfer(std::string_view itemId, const Location& expectedSource,
                           Location destination, std::string requestId);
+    /// Move a bounded set of whole instances as one transaction. Final-state
+    /// validation permits occupied-slot swaps without a temporary slot. The
+    /// receipt survives v6/v7 snapshots; exact retries succeed only while
+    /// every item remains at its submitted destination. No World endpoints.
+    Result<void> transferBatch(std::span<const TransferMove> moves,
+                               std::string requestId);
     /// Split a stack into a new explicitly identified instance at destination.
     Result<void> split(std::string_view itemId, std::uint32_t quantity,
                        std::string newItemId, Location destination);
