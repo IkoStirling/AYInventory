@@ -15,6 +15,11 @@ layers on the same Sim thread while running one interaction command.
    the drop present. AYInventory publishes the already-validated Store transfer
    only after that call succeeds. For a container, `activate` returns its ID;
    the game opens its own UI.
+   To exchange several items with that focused container, call
+   `transferFocusedContainerItems` with a game callback that authorizes every
+   proposed move and any other container involved. It stages all ownership
+   changes first, rechecks the current focus, and optionally saves the complete
+   candidate before publishing. Exact receipt retries perform no new effect.
 3. Craft in a registered material container. Reserve before entering the
    crafting animation; cancel on interruption; commit with a new stable item
    ID and an empty output slot. An ordinary `snapshot()` omits pending

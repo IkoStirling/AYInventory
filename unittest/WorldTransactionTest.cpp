@@ -70,6 +70,90 @@ struct InteractionHost final : IInteractionHost {
     }
 };
 
+void focusedContainerBatchUsesCurrentAuthorityAndOneSave()
+{
+    auto store = makeStore();
+    const Location bagA{Place::Container, "bag", "a"};
+    const Location chestA{Place::Container, "chest", "a"};
+    check(store.createItem({"wood-2", "wood", 1, chestA}), "chest item");
+    const InteractionCandidate focused{InteractionCandidate::Kind::OpenContainer,
+        "scene/chest", "chest", 1.0};
+    const std::vector<TransferMove> moves{
+        {"wood-1", bagA, chestA}, {"wood-2", chestA, bagA}};
+    InteractionHost host;
+    int moveChecks = 0, saves = 0;
+    const ContainerBatchAuthorization authorize =
+        [&](const InteractionCandidate& target, std::string_view actor,
+            std::span<const TransferMove> proposed) -> Result<void> {
+        ++moveChecks;
+        if (target != focused || actor != "player" || proposed.size() != 2)
+            return std::unexpected(Diagnostic{Error::Denied, "other container"});
+        return {};
+    };
+    host.current = false;
+    check(!transferFocusedContainerItems(store, host, focused, "player", moves,
+                                         "container-swap", authorize),
+          "stale focus rejects exchange");
+    host.current = true;
+    host.permitted = false;
+    check(!transferFocusedContainerItems(store, host, focused, "player", moves,
+                                         "container-swap", authorize),
+          "target permission rejects exchange");
+    host.permitted = true;
+    const ContainerBatchAuthorization denyMoves = [](const InteractionCandidate&,
+        std::string_view, std::span<const TransferMove>) -> Result<void> {
+        return std::unexpected(Diagnostic{Error::Denied, "bag is locked"});
+    };
+    check(!transferFocusedContainerItems(store, host, focused, "player", moves,
+                                         "container-swap", denyMoves),
+          "move-level permission rejects exchange");
+    const ContainerBatchAuthorization throwMoves = [](const InteractionCandidate&,
+        std::string_view, std::span<const TransferMove>) -> Result<void> {
+        throw std::runtime_error("authorization fault");
+    };
+    check(!transferFocusedContainerItems(store, host, focused, "player", moves,
+                                         "container-swap", throwMoves),
+          "throwing move authorization rejects exchange");
+    const ContainerBatchSave rejected = [&](const Store& candidate,
+                                            const InteractionCandidate&) {
+        ++saves;
+        check(candidate.findItem("wood-2")->location == bagA
+              && store.findItem("wood-2")->location == chestA,
+              "save sees complete candidate before publication");
+        return false;
+    };
+    check(!transferFocusedContainerItems(store, host, focused, "player", moves,
+                                         "container-swap", authorize, rejected),
+          "failed save rejects exchange");
+    check(store.findItem("wood-1")->location == bagA
+          && store.findItem("wood-2")->location == chestA
+          && !store.snapshot().completedTransfers.contains("container-swap"),
+          "failed exchange leaves both owners and receipt untouched");
+    const ContainerBatchSave accepted = [&](const Store&, const InteractionCandidate&) {
+        ++saves;
+        return true;
+    };
+    check(transferFocusedContainerItems(store, host, focused, "player", moves,
+                                        "container-swap", authorize, accepted),
+          "authorized exchange commits");
+    check(store.findItem("wood-1")->location == chestA
+          && store.findItem("wood-2")->location == bagA
+          && saves == 2 && moveChecks == 2,
+          "exchange publishes both owners once");
+    auto loaded = makeStore();
+    check(loaded.restore(store.snapshot()), "exchange receipt reloads");
+    host.current = false;
+    check(transferFocusedContainerItems(loaded, host, focused, "player", moves,
+                                        "container-swap", authorize, accepted),
+          "exact retry after load does not need stale focus");
+    check(saves == 2 && moveChecks == 2, "retry never saves or authorizes again");
+    const std::vector<TransferMove> unrelated{{"iron-1",
+        {Place::Container, "bag", "b"}, {Place::Container, "bag", "c"}}};
+    check(!transferFocusedContainerItems(loaded, host, focused, "player", unrelated,
+                                         "unrelated", authorize),
+          "focused interaction cannot move unrelated inventory");
+}
+
 struct DurableInteractionHost final : IDurablePickupHost {
     bool worldPresent = true;
     bool consumeSucceeds = false;
@@ -635,6 +719,7 @@ int main()
         concurrentReservations();
         pendingCraftsCanBeRestoredByExplicitSchemaSevenSnapshot();
         interactionAndPlacement();
+        focusedContainerBatchUsesCurrentAuthorityAndOneSave();
         directCraftPlacementIsOneRecoverableHandoff();
         durablePickupCommitsOwnershipBeforeBestEffortWorldCleanup();
         durablePlacementSavesCandidateOrRetractsWorld();

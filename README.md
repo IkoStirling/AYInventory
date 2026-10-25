@@ -85,6 +85,10 @@ schema v7：记录请求、配方与选中的材料实例及数量。`restore()`
 
 `WorldTransactions.h` 接收 Host 从 3D 射线/空间查询映射出的稳定对象 ID。
 `chooseFocus` 选最近候选，`activate` 在操作当下重验有效性与权限，完成拾取或返回可打开的容器 ID。
+在已聚焦容器与玩家背包之间搬运多件完整实例时，可用 `transferFocusedContainerItems`：
+它先暂存 `transferBatch`，再重验当前焦点、目标权限和游戏提供的逐项归属授权；
+每条移动必须涉及当前容器，且两端均为容器。可选保存回调接受完整候选后才发布
+Store，保存失败不留下半次交换；读档后的精确请求重试不会再次授权或保存。
 立即落盘的拾取可用 `activatePickupDurable`：游戏以 `PickupSave` 将候选 Store 与
 世界对象墓碑写入同一失败原子的槽；保存成功即提交所有权。实体删除若失败，
 结果仍表示已提交，并以 `cleanupPending` 提醒后续重试清理。`ScenePhysicsHost3D`

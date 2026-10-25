@@ -65,6 +65,29 @@ Result<Activation> activate(Store& store, IInteractionHost& host,
                             std::optional<Location> pickupDestination,
                             std::string requestId);
 
+/// A game-owned rule for the actor's access to every non-focused container
+/// and item in a proposed exchange. The focused target authorization alone
+/// cannot prove ownership of the actor's bag or another container.
+using ContainerBatchAuthorization = std::function<Result<void>(
+    const InteractionCandidate&, std::string_view actorId,
+    std::span<const TransferMove>)>;
+/// Optional failure-atomic save of the complete candidate Store. Returning
+/// false or throwing must mean no durable payload was published.
+using ContainerBatchSave = std::function<bool(
+    const Store& candidate, const InteractionCandidate& focused)>;
+
+/// Exchange 1..256 items between registered containers after rechecking the
+/// current focused container, game target permission and every move's access.
+/// Every move must involve the focused container. No World/equipment endpoints
+/// or Entity side effects are performed. With save, publish Store only after
+/// the complete candidate is accepted; exact retries do not save again.
+Result<Activation> transferFocusedContainerItems(
+    Store& store, IInteractionHost& host,
+    const InteractionCandidate& focused, std::string_view actorId,
+    std::span<const TransferMove> moves, std::string requestId,
+    const ContainerBatchAuthorization& authorizeMoves,
+    const ContainerBatchSave& save = {});
+
 struct DurablePickupResult {
     Activation activation;
     /// Authoritative ownership and save have committed. The World projection
