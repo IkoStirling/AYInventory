@@ -80,8 +80,13 @@ ctest --test-dir out/build/ayinventory --output-on-failure
 返回所选实例，`reservableQuantity` 查询尚未占用的数量。预留的整个实例暂时不能移动、
 拆分、合并或销毁。需要继续待办时，显式调用 `snapshotWithReservations()` 生成
 schema v8：记录制作和普通预留的请求与精确材料实例。`restore()` 在发布前校验归属和
-跨种类预留总量；不完整或超额的预留使整个恢复失败。v8 可读取 v2–v7 快照；
+跨种类预留总量；不完整或超额的预留使整个恢复失败。当前恢复器可读取 v2–v8 快照；
 普通 `snapshot()` 仍保持 v6，且不保存待办预留。
+`consumeHeldItems(holdRequestId, completionRequestId)` 原子扣除已占用的全部数量，
+允许只扣除堆叠的一部分；耗尽的实例 ID 永久退役，有附属配件的父实例不可耗尽。
+同一完成请求读档后只返回成功，不重复扣料；同一占用 ID 不可再次预留。
+一旦产生消耗收据，普通与显式预留快照均升为 schema v9，JSON 中增加
+`consumptions` 收据数组；v9 仍可读取 v2–v8。普通快照仍省略待办预留。
 需要直接建造时，`craftAndPlaceWorldItem` 在 Store 候选中预留并扣料，先让
 `IPlacementHost` 发布世界对象，再无分配交换候选 Store；空间检查或发布失败
 不会消耗材料。完成收据和世界物品 ID 同时持久化，重复调用只核验已发布对象。

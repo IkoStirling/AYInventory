@@ -435,6 +435,76 @@ void attachedPartsFollowEquipmentAndRestore()
           "part JSON roundtrip");
 #endif
 }
+void heldConsumptionRetiresOnlySpentInstances()
+{
+    auto created = Store::create(9, {{"ore", 10}});
+    check(created.has_value(), "consumption catalog");
+    auto store = std::move(*created);
+    check(store.addContainer({"stock", {"a", "b"}}).has_value(),
+          "consumption container");
+    const Location a{Place::Container, "stock", "a"};
+    const Location b{Place::Container, "stock", "b"};
+    check(store.createItem({"ore-1", "ore", 5, a}).has_value()
+          && store.createItem({"ore-2", "ore", 2, b}).has_value(),
+          "two material stacks");
+    check(store.reserveItems("ore", 6, "stock", "job/hold").has_value(),
+          "reserve across full and partial stacks");
+    check(store.consumeHeldItems("job/hold", "job/complete").has_value()
+          && !store.findItem("ore-1")
+          && store.findItem("ore-2")
+          && store.findItem("ore-2")->quantity == 1
+          && !store.findItemHold("job/hold")
+          && store.snapshot().schemaVersion == 9,
+          "one deduction retires full stack and keeps partial remainder");
+    check(!store.createItem({"ore-1", "ore", 1, a}),
+          "consumed instance identity cannot be reused");
+    check(store.consumeHeldItems("job/hold", "job/complete").has_value()
+          && !store.consumeHeldItems("job/hold", "changed-completion")
+          && !store.reserveItems("ore", 1, "stock", "job/hold"),
+          "receipt prevents changed replay and hold identity reuse");
+    const auto saved = store.snapshotWithReservations();
+    check(saved.schemaVersion == 9 && saved.completedConsumptions.size() == 1,
+          "reservation snapshot includes durable deduction receipt");
+    auto restored = Store::create(9, {{"ore", 10}});
+    check(restored.has_value() && restored->restore(saved).has_value()
+          && restored->consumeHeldItems("job/hold", "job/complete").has_value()
+          && restored->findItem("ore-2")->quantity == 1,
+          "restored deduction does not spend twice");
+#ifdef AY_INVENTORY_JSON
+    const auto encoded = encodeSnapshotJson(saved);
+    check(encoded.has_value(), "encode schema v9 deduction");
+    const auto decoded = decodeSnapshotJson(*encoded);
+    check(decoded.has_value() && decoded->completedConsumptions
+              == saved.completedConsumptions
+          && restored->restore(*decoded).has_value()
+          && restored->consumeHeldItems("job/hold", "job/complete").has_value(),
+          "schema v9 JSON preserves exact consumption receipt");
+#endif
+    auto invalid = saved;
+    invalid.pendingItemHolds.emplace("job/hold",
+        PendingItemHold{"stock", "ore", 1, {{"ore-2", 1}}});
+    check(!restored->restore(invalid)
+          && restored->findItem("ore-2")->quantity == 1,
+          "restoring active and completed same hold is rejected atomically");
+
+    Definition frame;
+    frame.id = "frame";
+    frame.attachmentSlots = {{"part", {"part"}}};
+    auto assembly = Store::create(10, {frame, {"part", 1}});
+    check(assembly.has_value()
+          && assembly->addContainer({"bag", {"a"}}).has_value()
+          && assembly->createItem({"frame-1", "frame", 1,
+              {Place::Container, "bag", "a"}}).has_value()
+          && assembly->createItem({"part-1", "part", 1,
+              {Place::Attachment, "frame-1", "part"}}).has_value()
+          && assembly->reserveItems("frame", 1, "bag", "assembly/hold").has_value(),
+          "reserve parent with attached part");
+    check(!assembly->consumeHeldItems("assembly/hold", "assembly/complete")
+          && assembly->findItem("frame-1")
+          && assembly->findItem("part-1")
+          && assembly->findItemHold("assembly/hold"),
+          "full consumption cannot orphan an attached part");
+}
 } // namespace
 
 int main()
@@ -450,6 +520,7 @@ int main()
         fullMergeRetiresSourceIdentity();
         replaySafeStackMerges();
         attachedPartsFollowEquipmentAndRestore();
+        heldConsumptionRetiresOnlySpentInstances();
         std::cout << "AYInventory: all ownership tests passed\n";
         return 0;
     } catch (const std::exception& error) {

@@ -59,7 +59,7 @@ Result<std::set<std::string>> slots(const Json& data)
 Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
 {
     try {
-        if (snapshot.schemaVersion < 2 || snapshot.schemaVersion > 8)
+        if (snapshot.schemaVersion < 2 || snapshot.schemaVersion > 9)
             return invalid<std::string>("unsupported inventory schema");
         if (snapshot.schemaVersion < 4 && !snapshot.retiredItemIds.empty())
             return invalid<std::string>("legacy inventory schema cannot encode retired IDs");
@@ -73,6 +73,8 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
             return invalid<std::string>("legacy inventory schema cannot encode pending crafts");
         if (snapshot.schemaVersion < 8 && !snapshot.pendingItemHolds.empty())
             return invalid<std::string>("legacy inventory schema cannot encode pending item holds");
+        if (snapshot.schemaVersion < 9 && !snapshot.completedConsumptions.empty())
+            return invalid<std::string>("legacy inventory schema cannot encode consumption receipts");
         Json root = {{"format", "AliyatInventory"},
                      {"schemaVersion", snapshot.schemaVersion},
                      {"catalogVersion", snapshot.catalogVersion},
@@ -88,6 +90,8 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
             root["pendingCrafts"] = Json::array();
         if (snapshot.schemaVersion >= 8)
             root["pendingItemHolds"] = Json::array();
+        if (snapshot.schemaVersion >= 9)
+            root["consumptions"] = Json::array();
         for (const auto& value : snapshot.containers)
             root["containers"].push_back({{"id", value.id}, {"slots", value.slots}});
         for (const auto& value : snapshot.actors)
@@ -148,6 +152,10 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
                     {"quantity", hold.quantity},
                     {"inputs", std::move(inputs)}});
             }
+        if (snapshot.schemaVersion >= 9)
+            for (const auto& [hold, request] : snapshot.completedConsumptions)
+                root["consumptions"].push_back({{"hold", hold},
+                    {"request", request}});
         return root.dump();
     } catch (const std::exception& ex) {
         return invalid<std::string>(ex.what());
@@ -164,7 +172,7 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
         std::string format;
         if (!text(root, "format", format) || format != "AliyatInventory"
             || !u32(root, "schemaVersion", snapshot.schemaVersion)
-            || snapshot.schemaVersion < 2 || snapshot.schemaVersion > 8
+            || snapshot.schemaVersion < 2 || snapshot.schemaVersion > 9
             || !u32(root, "catalogVersion", snapshot.catalogVersion)
             || !u64(root, "nextAbilityBindingId", snapshot.nextAbilityBindingId))
             return invalid<Snapshot>("invalid inventory header");
@@ -192,6 +200,10 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
              && (!root.contains("pendingItemHolds") || !root.at("pendingItemHolds").is_array()))
             || (snapshot.schemaVersion < 8 && root.contains("pendingItemHolds")))
             return invalid<Snapshot>("invalid pending item holds array");
+        if ((snapshot.schemaVersion >= 9
+             && (!root.contains("consumptions") || !root.at("consumptions").is_array()))
+            || (snapshot.schemaVersion < 9 && root.contains("consumptions")))
+            return invalid<Snapshot>("invalid consumptions array");
         if (snapshot.schemaVersion >= 4) {
             for (const auto& value : root["retiredItems"]) {
                 if (!value.is_string())
@@ -334,6 +346,16 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
                 if (!snapshot.pendingItemHolds.emplace(std::move(request),
                                                        std::move(hold)).second)
                     return invalid<Snapshot>("duplicate pending item hold request");
+            }
+        if (snapshot.schemaVersion >= 9)
+            for (const auto& value : root["consumptions"]) {
+                std::string hold, request;
+                if (!text(value, "hold", hold)
+                    || !text(value, "request", request)
+                    || hold.empty() || request.empty()
+                    || !snapshot.completedConsumptions.emplace(
+                        std::move(hold), std::move(request)).second)
+                    return invalid<Snapshot>("invalid item consumption receipt");
             }
         return snapshot;
     } catch (const std::exception& ex) {

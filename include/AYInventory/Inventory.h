@@ -160,10 +160,13 @@ struct Snapshot {
     std::map<std::string, std::string> completedTransfers;
     std::map<std::string, CraftReceipt> completedCrafts;
     std::map<std::string, MergeReceipt> completedMerges;
-    /// Schema v7 or v8. Ordinary snapshot() stays v6 and omits pending work.
+    /// Schema v7..v9. Ordinary snapshot() omits pending work.
     std::map<std::string, PendingCraft> pendingCrafts;
-    /// Schema v8 only; exact selected instances for non-crafting holds.
+    /// Schema v8/v9; exact selected instances for non-crafting holds.
     std::map<std::string, PendingItemHold> pendingItemHolds;
+    /// Schema v9. Hold request ID -> completion request ID. A receipt retires
+    /// its hold identity and prevents a second material deduction after load.
+    std::map<std::string, std::string> completedConsumptions;
 };
 
 /// Single-owner inventory state. Do not retain Item references across writes.
@@ -233,6 +236,13 @@ public:
                               std::string_view sourceContainerId,
                               std::string requestId);
     Result<void> cancelItems(std::string_view requestId);
+    /// Deduct every selected unit of one item hold, including partial stacks.
+    /// A full-stack deduction retires that instance ID; attached parents may
+    /// not be consumed. The hold ID cannot be reserved again after completion.
+    /// Exact retries with the same completion ID succeed without deducting.
+    /// The receipt is saved in schema v9; later item movement is allowed.
+    Result<void> consumeHeldItems(std::string_view holdRequestId,
+                                  std::string completionRequestId);
     /// Available unreserved units for one definition in one container.
     [[nodiscard]] std::uint64_t reservableQuantity(
         std::string_view definitionId,
@@ -248,7 +258,7 @@ public:
     [[nodiscard]] const Definition* findDefinition(std::string_view id) const;
     [[nodiscard]] std::optional<std::string> occupying(const Location& location) const;
     [[nodiscard]] Snapshot snapshot() const;
-    /// Opt into schema v8 to persist exact pending craft and item holds.
+    /// Opt into schema v8/v9 to persist exact pending craft and item holds.
     /// Restore validates every reserved instance and aggregate quantity before
     /// publishing; the default snapshot() intentionally discards pending work.
     [[nodiscard]] Snapshot snapshotWithReservations() const;
@@ -295,6 +305,7 @@ private:
     std::map<std::string, std::uint32_t> _reservedByItem;
     std::map<std::string, CraftReceipt> _completedCrafts;
     std::map<std::string, MergeReceipt> _completedMerges;
+    std::map<std::string, std::string> _completedConsumptions;
     [[nodiscard]] bool isReserved(std::string_view itemId) const;
 };
 

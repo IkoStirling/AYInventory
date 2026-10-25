@@ -396,7 +396,8 @@ Result<void> Store::reserveCraft(const Recipe& recipe,
     if (requestId.empty() || recipe.id.empty() || recipe.inputs.empty()
         || recipe.outputDefinitionId.empty() || recipe.outputQuantity == 0)
         return reject<void>(Error::Invalid, "incomplete recipe or request ID");
-    if (_completedCrafts.contains(requestId) || _itemHolds.contains(requestId))
+    if (_completedCrafts.contains(requestId) || _itemHolds.contains(requestId)
+        || _completedConsumptions.contains(requestId))
         return reject<void>(Error::Duplicate, "craft request already completed");
     if (const auto existing = _reservations.find(requestId);
         existing != _reservations.end()) {
@@ -498,7 +499,8 @@ Result<void> Store::reserveItems(std::string_view definitionId,
         || requestId.empty())
         return reject<void>(Error::Invalid, "incomplete item hold request");
     if (_reservations.contains(requestId) || _completedCrafts.contains(requestId)
-        || _completedTransfers.contains(requestId))
+        || _completedTransfers.contains(requestId)
+        || _completedConsumptions.contains(requestId))
         return reject<void>(Error::Duplicate, "item hold request ID reused");
     if (const auto existing = _itemHolds.find(requestId);
         existing != _itemHolds.end()) {
@@ -559,6 +561,57 @@ Result<void> Store::cancelItems(std::string_view requestId)
     }
     _itemHolds.erase(found);
     return {};
+}
+
+Result<void> Store::consumeHeldItems(std::string_view holdRequestId,
+                                    std::string completionRequestId)
+{
+    if (holdRequestId.empty() || completionRequestId.empty())
+        return reject<void>(Error::Invalid,
+            "item consumption needs hold and completion request IDs");
+    const auto key = std::string(holdRequestId);
+    if (const auto done = _completedConsumptions.find(key);
+        done != _completedConsumptions.end())
+        return done->second == completionRequestId
+            ? Result<void>{}
+            : reject<void>(Error::Duplicate,
+                "item hold already consumed by another completion");
+    if (!_itemHolds.contains(key))
+        return reject<void>(Error::Missing, "item hold missing");
+    try {
+        Store candidate = *this;
+        const auto hold = candidate._itemHolds.at(key);
+        if (auto released = candidate.cancelItems(key); !released)
+            return released;
+        for (const auto& input : hold.inputs) {
+            auto item = candidate._items.find(input.itemId);
+            if (item == candidate._items.end()
+                || item->second.definitionId != hold.definitionId
+                || item->second.location.place != Place::Container
+                || item->second.location.ownerId != hold.sourceContainerId
+                || item->second.quantity < input.quantity)
+                return reject<void>(Error::Stale,
+                    "held consumption material changed");
+            if (item->second.quantity == input.quantity) {
+                for (const auto& [_, child] : candidate._items)
+                    if (child.location.place == Place::Attachment
+                        && child.location.ownerId == input.itemId)
+                        return reject<void>(Error::Occupied,
+                            "attached parts prevent full item consumption");
+                candidate._retiredItemIds.insert(input.itemId);
+                candidate._items.erase(item);
+            } else {
+                item->second.quantity -= input.quantity;
+            }
+        }
+        candidate._completedConsumptions.emplace(key,
+            std::move(completionRequestId));
+        swap(candidate);
+        return {};
+    } catch (const std::bad_alloc&) {
+        return reject<void>(Error::Capacity,
+            "held item consumption allocation failed");
+    }
 }
 
 Result<void> Store::commitCraft(std::string_view requestId,
@@ -654,6 +707,7 @@ void Store::swap(Store& other) noexcept
     _completedTransfers.swap(other._completedTransfers);
     _completedCrafts.swap(other._completedCrafts);
     _completedMerges.swap(other._completedMerges);
+    _completedConsumptions.swap(other._completedConsumptions);
     _reservations.swap(other._reservations);
     _itemHolds.swap(other._itemHolds);
     _reservedByItem.swap(other._reservedByItem);
@@ -671,13 +725,15 @@ Snapshot Store::snapshot() const
     result.completedTransfers = _completedTransfers;
     result.completedCrafts = _completedCrafts;
     result.completedMerges = _completedMerges;
+    result.completedConsumptions = _completedConsumptions;
+    if (!_completedConsumptions.empty()) result.schemaVersion = 9;
     return result;
 }
 
 Snapshot Store::snapshotWithReservations() const
 {
     Snapshot result = snapshot();
-    result.schemaVersion = 8;
+    result.schemaVersion = _completedConsumptions.empty() ? 8 : 9;
     result.pendingCrafts = _reservations;
     result.pendingItemHolds = _itemHolds;
     return result;
@@ -688,7 +744,7 @@ Result<void> Store::restore(const Snapshot& saved)
     if ((saved.schemaVersion != 2 && saved.schemaVersion != 3
          && saved.schemaVersion != 4 && saved.schemaVersion != 5
          && saved.schemaVersion != 6 && saved.schemaVersion != 7
-         && saved.schemaVersion != 8)
+         && saved.schemaVersion != 8 && saved.schemaVersion != 9)
         || saved.catalogVersion != _catalogVersion)
         return reject<void>(Error::ContentVersion, "inventory snapshot version mismatch");
     if (saved.schemaVersion == 2 && !saved.completedCrafts.empty())
@@ -701,6 +757,9 @@ Result<void> Store::restore(const Snapshot& saved)
         return reject<void>(Error::Invalid, "legacy snapshot cannot contain pending crafts");
     if (saved.schemaVersion < 8 && !saved.pendingItemHolds.empty())
         return reject<void>(Error::Invalid, "legacy snapshot cannot contain item holds");
+    if (saved.schemaVersion < 9 && !saved.completedConsumptions.empty())
+        return reject<void>(Error::Invalid,
+            "legacy snapshot cannot contain consumption receipts");
     Store next(_catalogVersion);
     next._definitions = _definitions;
     for (const auto& container : saved.containers)
@@ -753,6 +812,7 @@ Result<void> Store::restore(const Snapshot& saved)
     next._completedCrafts = saved.completedCrafts;
     for (const auto& [request, craft] : saved.pendingCrafts) {
         if (request.empty() || next._completedCrafts.contains(request)
+            || saved.completedConsumptions.contains(request)
             || !next.hasContainer(craft.sourceContainerId)
             || craft.recipe.id.empty() || craft.recipe.inputs.empty()
             || craft.recipe.outputDefinitionId.empty()
@@ -797,6 +857,7 @@ Result<void> Store::restore(const Snapshot& saved)
         if (request.empty() || next._reservations.contains(request)
             || next._completedTransfers.contains(request)
             || next._completedCrafts.contains(request)
+            || saved.completedConsumptions.contains(request)
             || hold.sourceContainerId.empty() || hold.definitionId.empty()
             || !hold.quantity || hold.inputs.empty() || hold.inputs.size() > 256
             || !next.hasContainer(hold.sourceContainerId)
@@ -832,6 +893,17 @@ Result<void> Store::restore(const Snapshot& saved)
             return reject<void>(Error::Invalid, "invalid merge receipt");
     }
     next._completedMerges = saved.completedMerges;
+    for (const auto& [holdRequest, completionRequest]
+         : saved.completedConsumptions) {
+        if (holdRequest.empty() || completionRequest.empty()
+            || next._itemHolds.contains(holdRequest)
+            || next._reservations.contains(holdRequest)
+            || next._completedTransfers.contains(holdRequest)
+            || next._completedCrafts.contains(holdRequest))
+            return reject<void>(Error::Invalid,
+                "invalid completed item consumption receipt");
+    }
+    next._completedConsumptions = saved.completedConsumptions;
     next._nextAbilityBindingId = saved.nextAbilityBindingId;
     _containers.swap(next._containers);
     _actors.swap(next._actors);
@@ -840,6 +912,7 @@ Result<void> Store::restore(const Snapshot& saved)
     _completedTransfers.swap(next._completedTransfers);
     _completedCrafts.swap(next._completedCrafts);
     _completedMerges.swap(next._completedMerges);
+    _completedConsumptions.swap(next._completedConsumptions);
     _reservations.swap(next._reservations);
     _itemHolds.swap(next._itemHolds);
     _reservedByItem.swap(next._reservedByItem);
