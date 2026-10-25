@@ -636,6 +636,11 @@ Result<void> Store::commitCraft(std::string_view requestId,
             return reject<void>(Error::Stale, "reserved material changed");
         item->second.quantity -= input.quantity;
         if (item->second.quantity == 0) {
+            for (const auto& [_, child] : candidate._items)
+                if (child.location.place == Place::Attachment
+                    && child.location.ownerId == input.itemId)
+                    return reject<void>(Error::Occupied,
+                        "attached parts prevent full crafting consumption");
             candidate._retiredItemIds.insert(item->first);
             candidate._items.erase(item);
         }

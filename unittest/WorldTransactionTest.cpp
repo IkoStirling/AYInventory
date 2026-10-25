@@ -503,6 +503,40 @@ void craftAcrossStacks()
           "consumed material ID cannot be reused");
 }
 
+void craftingCannotOrphanAttachedParts()
+{
+    Definition frame{"frame", 1};
+    frame.attachmentSlots = {{"part", {"part"}}};
+    auto created = Store::create(7, {frame, {"part", 1}, {"result", 1}});
+    check(created, "assembly catalog");
+    auto store = std::move(*created);
+    check(store.addContainer({"bag", {"a", "b", "c"}}), "assembly bag");
+    check(store.createItem({"frame-1", "frame", 1,
+                            {Place::Container, "bag", "a"}}), "assembly parent");
+    const Location attached{Place::Attachment, "frame-1", "part"};
+    check(store.createItem({"part-1", "part", 1, attached}), "assembly child");
+    const Recipe recipe{"salvage", {{"frame", 1}}, "result", 1};
+    check(store.reserveCraft(recipe, "bag", "salvage-1"), "reserve parent");
+    check(!store.commitCraft("salvage-1", "result-1",
+                             {Place::Container, "bag", "c"}),
+          "craft must reject attached parent");
+    check(store.findItem("frame-1") && store.findItem("part-1")
+          && store.findItem("part-1")->location == attached
+          && !store.findCraftReceipt("salvage-1"),
+          "failed craft keeps parent, part, and reservation");
+    check(store.snapshotWithReservations().pendingCrafts.contains("salvage-1"),
+          "failed craft retains durable pending request");
+    check(store.transfer("part-1", attached,
+                         {Place::Container, "bag", "b"}, "detach-1"),
+          "detach child after failed craft");
+    check(store.commitCraft("salvage-1", "result-1",
+                            {Place::Container, "bag", "c"}),
+          "retry craft after detaching");
+    check(!store.findItem("frame-1") && store.findItem("part-1")
+          && store.findItem("result-1") && store.findCraftReceipt("salvage-1"),
+          "successful retry keeps detached part and output");
+}
+
 void concurrentReservations()
 {
     auto store = makeStore();
@@ -783,6 +817,7 @@ int main()
         craftReservations();
         craftFailuresAndSaveBoundary();
         craftAcrossStacks();
+        craftingCannotOrphanAttachedParts();
         concurrentReservations();
         pendingCraftsCanBeRestoredByExplicitSchemaEightSnapshot();
         itemHoldsCompeteWithCraftsAndRestoreExactInputs();

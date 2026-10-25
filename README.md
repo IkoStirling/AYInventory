@@ -73,7 +73,7 @@ ctest --test-dir out/build/ayinventory --output-on-failure
 ```
 
 `reserveCraft(recipe, containerId, requestId)` 按物品定义锁定材料；
-`commitCraft` 一次性扣料并产生一个有稳定 ID 的输出实例，失败保持材料与预留；
+`commitCraft` 一次性扣料并产生一个有稳定 ID 的输出实例，失败保持材料与预留；若材料实例上仍有附件且将被完全消耗，需先拆下附件，否则制作失败并保留预留。
 `cancelCraft` 释放预留。普通 `snapshot()` 仍生成 schema v6，待提交预留不入快照；
 读档相当于取消。`reserveItems(definitionId, quantity, containerId, requestId)` 为普通
 工作占用确定的物品实例数量，与制作共用可用量；`cancelItems` 释放，`findItemHold`

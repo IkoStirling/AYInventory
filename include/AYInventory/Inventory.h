@@ -223,7 +223,8 @@ public:
                               std::string_view sourceContainerId,
                               std::string requestId);
     /// Commit all deductions and one output as one Store state swap. A failed
-    /// commit keeps the reservation and all input units untouched.
+    /// commit keeps the reservation and all input units untouched. A fully
+    /// consumed input with attached parts is rejected until the parts detach.
     Result<void> commitCraft(std::string_view requestId,
                              std::string outputItemId, Location destination);
     Result<void> cancelCraft(std::string_view requestId);
