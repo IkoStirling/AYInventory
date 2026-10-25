@@ -2,6 +2,7 @@
 
 #include <limits>
 #include <algorithm>
+#include <new>
 #include <utility>
 
 namespace ayt::inventory {
@@ -395,7 +396,7 @@ Result<void> Store::reserveCraft(const Recipe& recipe,
     if (requestId.empty() || recipe.id.empty() || recipe.inputs.empty()
         || recipe.outputDefinitionId.empty() || recipe.outputQuantity == 0)
         return reject<void>(Error::Invalid, "incomplete recipe or request ID");
-    if (_completedCrafts.contains(requestId))
+    if (_completedCrafts.contains(requestId) || _itemHolds.contains(requestId))
         return reject<void>(Error::Duplicate, "craft request already completed");
     if (const auto existing = _reservations.find(requestId);
         existing != _reservations.end()) {
@@ -433,13 +434,22 @@ Result<void> Store::reserveCraft(const Recipe& recipe,
         if (remaining != 0)
             return reject<void>(Error::Insufficient, "recipe materials unavailable");
     }
-    // Publish only after all material groups have been selected.
-    const auto [entry, inserted] = _reservations.emplace(std::move(requestId),
-                                                          std::move(staged));
-    (void)inserted;
-    for (const auto& input : entry->second.inputs)
-        _reservedByItem[input.itemId] += input.quantity;
-    return {};
+    // A second map may allocate while updating aggregate reservations. Stage
+    // both maps so allocation failure cannot publish half a hold.
+    try {
+        auto candidateCrafts = _reservations;
+        auto candidateReserved = _reservedByItem;
+        const auto [entry, inserted] = candidateCrafts.emplace(
+            std::move(requestId), std::move(staged));
+        (void)inserted;
+        for (const auto& input : entry->second.inputs)
+            candidateReserved[input.itemId] += input.quantity;
+        _reservations.swap(candidateCrafts);
+        _reservedByItem.swap(candidateReserved);
+        return {};
+    } catch (const std::bad_alloc&) {
+        return reject<void>(Error::Capacity, "craft reservation allocation failed");
+    }
 }
 
 Result<void> Store::cancelCraft(std::string_view requestId)
@@ -453,6 +463,101 @@ Result<void> Store::cancelCraft(std::string_view requestId)
         if (reserved->second == 0) _reservedByItem.erase(reserved);
     }
     _reservations.erase(found);
+    return {};
+}
+
+std::uint64_t Store::reservableQuantity(
+    std::string_view definitionId,
+    std::string_view sourceContainerId) const noexcept
+{
+    std::uint64_t available = 0;
+    for (const auto& [id, item] : _items) {
+        if (item.definitionId != definitionId
+            || item.location.place != Place::Container
+            || item.location.ownerId != sourceContainerId) continue;
+        const auto reserved = _reservedByItem.find(id);
+        if (reserved != _reservedByItem.end() && reserved->second <= item.quantity)
+            available += item.quantity - reserved->second;
+        else if (reserved == _reservedByItem.end()) available += item.quantity;
+    }
+    return available;
+}
+
+const PendingItemHold* Store::findItemHold(std::string_view requestId) const
+{
+    const auto found = _itemHolds.find(std::string(requestId));
+    return found == _itemHolds.end() ? nullptr : &found->second;
+}
+
+Result<void> Store::reserveItems(std::string_view definitionId,
+                                 std::uint32_t quantity,
+                                 std::string_view sourceContainerId,
+                                 std::string requestId)
+{
+    if (definitionId.empty() || !quantity || sourceContainerId.empty()
+        || requestId.empty())
+        return reject<void>(Error::Invalid, "incomplete item hold request");
+    if (_reservations.contains(requestId) || _completedCrafts.contains(requestId)
+        || _completedTransfers.contains(requestId))
+        return reject<void>(Error::Duplicate, "item hold request ID reused");
+    if (const auto existing = _itemHolds.find(requestId);
+        existing != _itemHolds.end()) {
+        return existing->second.definitionId == definitionId
+            && existing->second.quantity == quantity
+            && existing->second.sourceContainerId == sourceContainerId
+            ? Result<void>{}
+            : reject<void>(Error::Duplicate, "item hold request changed");
+    }
+    if (!hasContainer(sourceContainerId) || !findDefinition(definitionId))
+        return reject<void>(Error::Missing, "item hold container or definition missing");
+    try {
+        PendingItemHold hold{std::string(sourceContainerId),
+                             std::string(definitionId), quantity, {}};
+        auto remaining = quantity;
+        for (const auto& [id, item] : _items) {
+            if (item.location.place != Place::Container
+                || item.location.ownerId != sourceContainerId
+                || item.definitionId != definitionId) continue;
+            const auto reserved = _reservedByItem.contains(id)
+                ? _reservedByItem.at(id) : 0;
+            if (reserved > item.quantity)
+                return reject<void>(Error::Invalid, "item holds exceed item quantity");
+            const auto take = std::min(remaining, item.quantity - reserved);
+            if (!take) continue;
+            if (hold.inputs.size() == 256)
+                return reject<void>(Error::Capacity, "item hold exceeds 256 stacks");
+            hold.inputs.push_back({id, take});
+            remaining -= take;
+            if (!remaining) break;
+        }
+        if (remaining)
+            return reject<void>(Error::Insufficient, "item hold units unavailable");
+        auto candidateHolds = _itemHolds;
+        auto candidateReserved = _reservedByItem;
+        const auto [entry, inserted] = candidateHolds.emplace(
+            std::move(requestId), std::move(hold));
+        (void)inserted;
+        for (const auto& input : entry->second.inputs)
+            candidateReserved[input.itemId] += input.quantity;
+        _itemHolds.swap(candidateHolds);
+        _reservedByItem.swap(candidateReserved);
+        return {};
+    } catch (const std::bad_alloc&) {
+        return reject<void>(Error::Capacity, "item hold allocation failed");
+    }
+}
+
+Result<void> Store::cancelItems(std::string_view requestId)
+{
+    const auto found = _itemHolds.find(std::string(requestId));
+    if (found == _itemHolds.end())
+        return reject<void>(Error::Missing, "item hold missing");
+    for (const auto& input : found->second.inputs) {
+        auto reserved = _reservedByItem.find(input.itemId);
+        reserved->second -= input.quantity;
+        if (!reserved->second) _reservedByItem.erase(reserved);
+    }
+    _itemHolds.erase(found);
     return {};
 }
 
@@ -550,6 +655,7 @@ void Store::swap(Store& other) noexcept
     _completedCrafts.swap(other._completedCrafts);
     _completedMerges.swap(other._completedMerges);
     _reservations.swap(other._reservations);
+    _itemHolds.swap(other._itemHolds);
     _reservedByItem.swap(other._reservedByItem);
 }
 
@@ -571,8 +677,9 @@ Snapshot Store::snapshot() const
 Snapshot Store::snapshotWithReservations() const
 {
     Snapshot result = snapshot();
-    result.schemaVersion = 7;
+    result.schemaVersion = 8;
     result.pendingCrafts = _reservations;
+    result.pendingItemHolds = _itemHolds;
     return result;
 }
 
@@ -580,7 +687,8 @@ Result<void> Store::restore(const Snapshot& saved)
 {
     if ((saved.schemaVersion != 2 && saved.schemaVersion != 3
          && saved.schemaVersion != 4 && saved.schemaVersion != 5
-         && saved.schemaVersion != 6 && saved.schemaVersion != 7)
+         && saved.schemaVersion != 6 && saved.schemaVersion != 7
+         && saved.schemaVersion != 8)
         || saved.catalogVersion != _catalogVersion)
         return reject<void>(Error::ContentVersion, "inventory snapshot version mismatch");
     if (saved.schemaVersion == 2 && !saved.completedCrafts.empty())
@@ -591,6 +699,8 @@ Result<void> Store::restore(const Snapshot& saved)
         return reject<void>(Error::Invalid, "legacy snapshot cannot contain merge receipts");
     if (saved.schemaVersion < 7 && !saved.pendingCrafts.empty())
         return reject<void>(Error::Invalid, "legacy snapshot cannot contain pending crafts");
+    if (saved.schemaVersion < 8 && !saved.pendingItemHolds.empty())
+        return reject<void>(Error::Invalid, "legacy snapshot cannot contain item holds");
     Store next(_catalogVersion);
     next._definitions = _definitions;
     for (const auto& container : saved.containers)
@@ -683,6 +793,37 @@ Result<void> Store::restore(const Snapshot& saved)
                 return reject<void>(Error::Invalid, "pending craft recipe not fully reserved");
         next._reservations.emplace(request, craft);
     }
+    for (const auto& [request, hold] : saved.pendingItemHolds) {
+        if (request.empty() || next._reservations.contains(request)
+            || next._completedTransfers.contains(request)
+            || next._completedCrafts.contains(request)
+            || hold.sourceContainerId.empty() || hold.definitionId.empty()
+            || !hold.quantity || hold.inputs.empty() || hold.inputs.size() > 256
+            || !next.hasContainer(hold.sourceContainerId)
+            || !next.findDefinition(hold.definitionId))
+            return reject<void>(Error::Invalid, "invalid pending item hold identity");
+        std::set<std::string> seenItems;
+        std::uint64_t total = 0;
+        for (const auto& input : hold.inputs) {
+            const auto item = next._items.find(input.itemId);
+            if (input.itemId.empty() || !input.quantity
+                || !seenItems.insert(input.itemId).second
+                || item == next._items.end()
+                || item->second.definitionId != hold.definitionId
+                || item->second.location.place != Place::Container
+                || item->second.location.ownerId != hold.sourceContainerId)
+                return reject<void>(Error::Invalid, "invalid pending item hold input");
+            const auto reserved = static_cast<std::uint64_t>(
+                next._reservedByItem[input.itemId]) + input.quantity;
+            if (reserved > item->second.quantity)
+                return reject<void>(Error::Invalid, "pending holds oversubscribe an item");
+            next._reservedByItem[input.itemId] = static_cast<std::uint32_t>(reserved);
+            total += input.quantity;
+        }
+        if (total != hold.quantity)
+            return reject<void>(Error::Invalid, "pending item hold quantity mismatch");
+        next._itemHolds.emplace(request, hold);
+    }
     for (const auto& [request, receipt] : saved.completedMerges) {
         if (request.empty() || receipt.sourceItemId.empty()
             || receipt.targetItemId.empty()
@@ -700,6 +841,7 @@ Result<void> Store::restore(const Snapshot& saved)
     _completedCrafts.swap(next._completedCrafts);
     _completedMerges.swap(next._completedMerges);
     _reservations.swap(next._reservations);
+    _itemHolds.swap(next._itemHolds);
     _reservedByItem.swap(next._reservedByItem);
     _nextAbilityBindingId = next._nextAbilityBindingId;
     return {};

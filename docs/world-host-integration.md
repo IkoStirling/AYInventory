@@ -24,7 +24,8 @@ layers on the same Sim thread while running one interaction command.
    crafting animation; cancel on interruption; commit with a new stable item
    ID and an empty output slot. An ordinary `snapshot()` omits pending
    reservations, so a load restores the materials untouched. To resume a
-   long-running craft, save `snapshotWithReservations()` schema v7 with the
+   long-running craft or another item hold, save `snapshotWithReservations()`
+   schema v8 with the
    same Store state; restore validates exact reserved item IDs and quantities
    before making the Store active.
 4. For placement, map `PlacementPose` and extents to the Scene's world pose and

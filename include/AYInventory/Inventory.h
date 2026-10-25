@@ -123,6 +123,16 @@ struct PendingCraft {
     bool operator==(const PendingCraft&) const = default;
 };
 
+/// Exact stack units held for a non-crafting operation. The owner chooses
+/// when to release or settle the hold; Store never infers gameplay work.
+struct PendingItemHold {
+    std::string sourceContainerId;
+    std::string definitionId;
+    std::uint32_t quantity = 0;
+    std::vector<ReservedCraftInput> inputs;
+    bool operator==(const PendingItemHold&) const = default;
+};
+
 /// A completed stack merge and its immediate post-merge quantities. Exact
 /// retries succeed only while those quantities still describe the same
 /// items; mismatching later quantities make the old request stale.
@@ -150,8 +160,10 @@ struct Snapshot {
     std::map<std::string, std::string> completedTransfers;
     std::map<std::string, CraftReceipt> completedCrafts;
     std::map<std::string, MergeReceipt> completedMerges;
-    /// Schema v7 only. Ordinary snapshot() stays v6 and omits pending work.
+    /// Schema v7 or v8. Ordinary snapshot() stays v6 and omits pending work.
     std::map<std::string, PendingCraft> pendingCrafts;
+    /// Schema v8 only; exact selected instances for non-crafting holds.
+    std::map<std::string, PendingItemHold> pendingItemHolds;
 };
 
 /// Single-owner inventory state. Do not retain Item references across writes.
@@ -212,6 +224,22 @@ public:
     Result<void> commitCraft(std::string_view requestId,
                              std::string outputItemId, Location destination);
     Result<void> cancelCraft(std::string_view requestId);
+    /// Hold a definition's units in one container for a game-owned operation.
+    /// Up to 256 available stacks are selected by stable item ID after all
+    /// other holds.
+    /// Exact retries preserve the original selection; cancellation releases it.
+    Result<void> reserveItems(std::string_view definitionId,
+                              std::uint32_t quantity,
+                              std::string_view sourceContainerId,
+                              std::string requestId);
+    Result<void> cancelItems(std::string_view requestId);
+    /// Available unreserved units for one definition in one container.
+    [[nodiscard]] std::uint64_t reservableQuantity(
+        std::string_view definitionId,
+        std::string_view sourceContainerId) const noexcept;
+    /// Borrowed pointer expires on Store mutation.
+    [[nodiscard]] const PendingItemHold* findItemHold(
+        std::string_view requestId) const;
     [[nodiscard]] bool hasContainer(std::string_view id) const;
 
     [[nodiscard]] const Item* findItem(std::string_view id) const;
@@ -220,7 +248,7 @@ public:
     [[nodiscard]] const Definition* findDefinition(std::string_view id) const;
     [[nodiscard]] std::optional<std::string> occupying(const Location& location) const;
     [[nodiscard]] Snapshot snapshot() const;
-    /// Opt into schema v7 to persist exact pending material reservations.
+    /// Opt into schema v8 to persist exact pending craft and item holds.
     /// Restore validates every reserved instance and aggregate quantity before
     /// publishing; the default snapshot() intentionally discards pending work.
     [[nodiscard]] Snapshot snapshotWithReservations() const;
@@ -263,6 +291,7 @@ private:
     std::set<std::string> _retiredItemIds;
     std::map<std::string, std::string> _completedTransfers;
     std::map<std::string, PendingCraft> _reservations;
+    std::map<std::string, PendingItemHold> _itemHolds;
     std::map<std::string, std::uint32_t> _reservedByItem;
     std::map<std::string, CraftReceipt> _completedCrafts;
     std::map<std::string, MergeReceipt> _completedMerges;

@@ -59,7 +59,7 @@ Result<std::set<std::string>> slots(const Json& data)
 Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
 {
     try {
-        if (snapshot.schemaVersion < 2 || snapshot.schemaVersion > 7)
+        if (snapshot.schemaVersion < 2 || snapshot.schemaVersion > 8)
             return invalid<std::string>("unsupported inventory schema");
         if (snapshot.schemaVersion < 4 && !snapshot.retiredItemIds.empty())
             return invalid<std::string>("legacy inventory schema cannot encode retired IDs");
@@ -71,6 +71,8 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
             return invalid<std::string>("legacy inventory schema cannot encode merge receipts");
         if (snapshot.schemaVersion < 7 && !snapshot.pendingCrafts.empty())
             return invalid<std::string>("legacy inventory schema cannot encode pending crafts");
+        if (snapshot.schemaVersion < 8 && !snapshot.pendingItemHolds.empty())
+            return invalid<std::string>("legacy inventory schema cannot encode pending item holds");
         Json root = {{"format", "AliyatInventory"},
                      {"schemaVersion", snapshot.schemaVersion},
                      {"catalogVersion", snapshot.catalogVersion},
@@ -84,6 +86,8 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
             root["merges"] = Json::array();
         if (snapshot.schemaVersion >= 7)
             root["pendingCrafts"] = Json::array();
+        if (snapshot.schemaVersion >= 8)
+            root["pendingItemHolds"] = Json::array();
         for (const auto& value : snapshot.containers)
             root["containers"].push_back({{"id", value.id}, {"slots", value.slots}});
         for (const auto& value : snapshot.actors)
@@ -132,6 +136,18 @@ Result<std::string> encodeSnapshotJson(const Snapshot& snapshot)
                         {"outputQuantity", craft.recipe.outputQuantity}}},
                     {"materials", std::move(materials)}});
             }
+        if (snapshot.schemaVersion >= 8)
+            for (const auto& [request, hold] : snapshot.pendingItemHolds) {
+                Json inputs = Json::array();
+                for (const auto& input : hold.inputs)
+                    inputs.push_back({{"item", input.itemId},
+                                      {"quantity", input.quantity}});
+                root["pendingItemHolds"].push_back({{"request", request},
+                    {"source", hold.sourceContainerId},
+                    {"definition", hold.definitionId},
+                    {"quantity", hold.quantity},
+                    {"inputs", std::move(inputs)}});
+            }
         return root.dump();
     } catch (const std::exception& ex) {
         return invalid<std::string>(ex.what());
@@ -148,7 +164,7 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
         std::string format;
         if (!text(root, "format", format) || format != "AliyatInventory"
             || !u32(root, "schemaVersion", snapshot.schemaVersion)
-            || snapshot.schemaVersion < 2 || snapshot.schemaVersion > 7
+            || snapshot.schemaVersion < 2 || snapshot.schemaVersion > 8
             || !u32(root, "catalogVersion", snapshot.catalogVersion)
             || !u64(root, "nextAbilityBindingId", snapshot.nextAbilityBindingId))
             return invalid<Snapshot>("invalid inventory header");
@@ -172,6 +188,10 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
              && (!root.contains("pendingCrafts") || !root.at("pendingCrafts").is_array()))
             || (snapshot.schemaVersion < 7 && root.contains("pendingCrafts")))
             return invalid<Snapshot>("invalid pending crafts array");
+        if ((snapshot.schemaVersion >= 8
+             && (!root.contains("pendingItemHolds") || !root.at("pendingItemHolds").is_array()))
+            || (snapshot.schemaVersion < 8 && root.contains("pendingItemHolds")))
+            return invalid<Snapshot>("invalid pending item holds array");
         if (snapshot.schemaVersion >= 4) {
             for (const auto& value : root["retiredItems"]) {
                 if (!value.is_string())
@@ -293,6 +313,27 @@ Result<Snapshot> decodeSnapshotJson(std::string_view payloadJson)
                 if (!snapshot.pendingCrafts.emplace(std::move(request),
                                                     std::move(craft)).second)
                     return invalid<Snapshot>("duplicate pending craft request");
+            }
+        if (snapshot.schemaVersion >= 8)
+            for (const auto& value : root["pendingItemHolds"]) {
+                std::string request;
+                PendingItemHold hold;
+                if (!text(value, "request", request)
+                    || !text(value, "source", hold.sourceContainerId)
+                    || !text(value, "definition", hold.definitionId)
+                    || !u32(value, "quantity", hold.quantity)
+                    || !value.contains("inputs") || !value.at("inputs").is_array())
+                    return invalid<Snapshot>("invalid pending item hold record");
+                for (const auto& input : value.at("inputs")) {
+                    ReservedCraftInput selected;
+                    if (!text(input, "item", selected.itemId)
+                        || !u32(input, "quantity", selected.quantity))
+                        return invalid<Snapshot>("invalid pending item hold input");
+                    hold.inputs.push_back(std::move(selected));
+                }
+                if (!snapshot.pendingItemHolds.emplace(std::move(request),
+                                                       std::move(hold)).second)
+                    return invalid<Snapshot>("duplicate pending item hold request");
             }
         return snapshot;
     } catch (const std::exception& ex) {

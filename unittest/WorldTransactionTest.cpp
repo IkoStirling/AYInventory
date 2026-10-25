@@ -521,7 +521,7 @@ void concurrentReservations()
           "fully consumed ingredient retired");
 }
 
-void pendingCraftsCanBeRestoredByExplicitSchemaSevenSnapshot()
+void pendingCraftsCanBeRestoredByExplicitSchemaEightSnapshot()
 {
     auto store = makeStore();
     check(store.createItem({"wood-2", "wood", 3,
@@ -533,9 +533,9 @@ void pendingCraftsCanBeRestoredByExplicitSchemaSevenSnapshot()
     check(ordinary.schemaVersion == 6 && ordinary.pendingCrafts.empty(),
           "ordinary snapshot keeps compatibility behavior");
     auto saved = store.snapshotWithReservations();
-    check(saved.schemaVersion == 7 && saved.pendingCrafts.size() == 1
+    check(saved.schemaVersion == 8 && saved.pendingCrafts.size() == 1
           && saved.pendingCrafts.at("long-craft").inputs.size() == 3,
-          "schema seven records exact material stacks");
+          "schema eight records exact material stacks");
     auto loaded = makeStore();
     check(loaded.restore(saved), "restore pending craft");
     check(!loaded.transfer("wood-1", {Place::Container, "bag", "a"},
@@ -576,6 +576,73 @@ void pendingCraftsCanBeRestoredByExplicitSchemaSevenSnapshot()
     check(fromJson.transfer("wood-1", {Place::Container, "bag", "a"},
                             {Place::Container, "chest", "a"}, "after-cancel"),
           "restored cancellation permits transfer");
+#endif
+}
+
+void itemHoldsCompeteWithCraftsAndRestoreExactInputs()
+{
+    auto store = makeStore();
+    check(store.reserveItems("wood", 3, "bag", "work/1"),
+          "reserve non-crafting item units");
+    check(store.reserveItems("wood", 3, "bag", "work/1"),
+          "exact item hold retry");
+    check(!store.reserveItems("wood", 4, "bag", "work/1"),
+          "changed item hold request rejected");
+    check(store.reservableQuantity("wood", "bag") == 2
+          && store.findItemHold("work/1")
+          && store.findItemHold("work/1")->inputs.front()
+                 == ReservedCraftInput{"wood-1", 3},
+          "selected instance and remaining quantity are stable");
+    check(!store.transfer("wood-1", {Place::Container, "bag", "a"},
+                          {Place::Container, "chest", "a"}, "move-held"),
+          "held stack cannot be transferred");
+    check(!store.reserveCraft(campfire(), "bag", "craft-overlap"),
+          "craft cannot oversubscribe non-crafting hold");
+    auto recipe = campfire();
+    recipe.inputs.front().quantity = 2;
+    check(store.reserveCraft(recipe, "bag", "craft-shared"),
+          "craft may reserve only remaining units");
+    check(store.reservableQuantity("wood", "bag") == 0,
+          "craft and item holds share availability");
+    const auto saved = store.snapshotWithReservations();
+    check(saved.schemaVersion == 8 && saved.pendingItemHolds.size() == 1
+          && saved.pendingCrafts.size() == 1,
+          "schema eight saves both reservation kinds");
+    auto loaded = makeStore();
+    check(loaded.restore(saved), "restore mixed reservations");
+    check(loaded.reservableQuantity("wood", "bag") == 0
+          && loaded.findItemHold("work/1"),
+          "restored hold retains exact units");
+    auto corrupt = saved;
+    corrupt.pendingItemHolds.at("work/1").inputs.front().quantity = 4;
+    check(!loaded.restore(corrupt)
+          && loaded.snapshotWithReservations().pendingItemHolds
+             == saved.pendingItemHolds,
+          "oversubscribed hold restore leaves live state unchanged");
+    corrupt = saved;
+    corrupt.schemaVersion = 7;
+    check(!loaded.restore(corrupt), "v7 cannot contain item holds");
+    corrupt.pendingItemHolds.clear();
+    auto oldCraft = makeStore();
+    check(oldCraft.restore(corrupt)
+          && oldCraft.reservableQuantity("wood", "bag") == 3,
+          "v7 pending craft snapshot remains readable");
+    check(loaded.cancelItems("work/1")
+          && loaded.reservableQuantity("wood", "bag") == 3,
+          "cancel hold returns only its own units");
+    check(loaded.cancelCraft("craft-shared")
+          && loaded.reservableQuantity("wood", "bag") == 5,
+          "cancel craft returns remaining units");
+    check(loaded.transfer("wood-1", {Place::Container, "bag", "a"},
+                          {Place::Container, "chest", "a"}, "move-free"),
+          "released item can move");
+#ifdef AY_INVENTORY_JSON
+    auto encoded = encodeSnapshotJson(saved);
+    check(encoded, "encode schema-eight mixed holds");
+    auto decoded = decodeSnapshotJson(*encoded);
+    check(decoded && decoded->pendingItemHolds == saved.pendingItemHolds
+          && decoded->pendingCrafts == saved.pendingCrafts,
+          "decode schema-eight mixed holds");
 #endif
 }
 
@@ -717,7 +784,8 @@ int main()
         craftFailuresAndSaveBoundary();
         craftAcrossStacks();
         concurrentReservations();
-        pendingCraftsCanBeRestoredByExplicitSchemaSevenSnapshot();
+        pendingCraftsCanBeRestoredByExplicitSchemaEightSnapshot();
+        itemHoldsCompeteWithCraftsAndRestoreExactInputs();
         interactionAndPlacement();
         focusedContainerBatchUsesCurrentAuthorityAndOneSave();
         directCraftPlacementIsOneRecoverableHandoff();
