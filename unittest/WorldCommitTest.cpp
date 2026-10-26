@@ -10,6 +10,7 @@
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <stdexcept>
 
 using namespace ayt::inventory;
@@ -128,6 +129,29 @@ struct BatchPlacementHost final : IPlacementHost {
     void abort() noexcept override { prepared.reset(); }
 };
 
+struct BatchPickupHost final : IDurablePickupHost {
+    std::set<std::string> present;
+    std::string failCleanup;
+    Result<void> validateCurrent(const InteractionCandidate& candidate,
+                                 std::string_view) override
+    {
+        if (present.contains(candidate.objectId)) return {};
+        return std::unexpected(Diagnostic{Error::Stale, "drop missing"});
+    }
+    Result<void> authorize(const InteractionCandidate&,
+                           std::string_view) override { return {}; }
+    Result<void> consumeWorldPickup(const InteractionCandidate&) override
+    { return std::unexpected(Diagnostic{Error::Invalid, "wrong path"}); }
+    Result<void> cleanupCommittedPickup(
+        const InteractionCandidate& candidate) override
+    {
+        if (candidate.objectId == failCleanup)
+            return std::unexpected(Diagnostic{Error::Stale, "cleanup failed"});
+        present.erase(candidate.objectId);
+        return {};
+    }
+};
+
 void run()
 {
     namespace fs = std::filesystem;
@@ -186,6 +210,71 @@ void run()
                                  "pickup-1", "pickup/wood-1/bag");
     check(replay && replay->status == WorldCommitStatus::AlreadyCommitted,
           "exact pickup replay");
+
+    auto pickupBatchCatalog = [] {
+        auto made = Store::create(2, {{"wood", 1}});
+        check(made, "pickup batch catalog");
+        auto value = std::move(*made);
+        check(value.addContainer({"pickup-bag", {"a", "b"}}),
+              "pickup batch bag");
+        return value;
+    };
+    auto pickupBatchStore = pickupBatchCatalog();
+    const std::string pickupA = "cccccccccccccccccccccccccccccccc";
+    const std::string pickupB = "dddddddddddddddddddddddddddddddd";
+    const Location worldA{Place::World, pickupA, {}};
+    const Location worldB{Place::World, pickupB, {}};
+    const Location bagA{Place::Container, "pickup-bag", "a"};
+    const Location bagB{Place::Container, "pickup-bag", "b"};
+    check(pickupBatchStore.createItem({"pickup-wood-a", "wood", 1, worldA}),
+          "first batch drop");
+    check(pickupBatchStore.createItem({"pickup-wood-b", "wood", 1, worldB}),
+          "second batch drop");
+    std::vector<WorldBatchPickup> pickups{
+        {{InteractionCandidate::Kind::Pickup, pickupA, "pickup-wood-a", 1.0}, bagA},
+        {{InteractionCandidate::Kind::Pickup, pickupB, "pickup-wood-b", 1.0}, bagB}
+    };
+    ayt::app::WorldStateLedger pickupBatchLedger;
+    BatchPickupHost pickupBatchHost;
+    pickupBatchHost.present = {pickupA, pickupB};
+    WorldItemCommit blockedPickupBatch(pickupBatchStore, pickupBatchLedger,
+                                       blockedSave, "pickup-batch-slot");
+    check(!blockedPickupBatch.pickupBatch(pickupBatchHost, pickups,
+        "player", "pickup-batch-1", "pickup/two-woods"),
+        "pickup batch save fault");
+    check(pickupBatchStore.findItem("pickup-wood-a")->location == worldA
+          && pickupBatchStore.findItem("pickup-wood-b")->location == worldB
+          && pickupBatchHost.present.size() == 2u
+          && !pickupBatchLedger.hasReceipt("pickup-batch-1"),
+          "failed batch pickup changes nothing");
+    pickupBatchHost.failCleanup = pickupB;
+    WorldItemCommit pickupBatchCommit(pickupBatchStore, pickupBatchLedger,
+                                      saves, "pickup-batch-slot");
+    auto batchPicked = pickupBatchCommit.pickupBatch(pickupBatchHost, pickups,
+        "player", "pickup-batch-1", "pickup/two-woods");
+    check(batchPicked
+          && batchPicked->status == WorldCommitStatus::ProjectionPending
+          && batchPicked->pendingObjectIds == std::vector<std::string>{pickupB},
+          "batch pickup reports only failed cleanup");
+    auto pickupBatchRestored = pickupBatchCatalog();
+    ayt::app::WorldStateLedger pickupBatchRestoredLedger;
+    check(restoreWorldItemCommitSlot(pickupBatchRestored,
+        pickupBatchRestoredLedger, saves, "pickup-batch-slot"),
+        "pickup batch restart");
+    WorldItemCommit pickupBatchResumed(pickupBatchRestored,
+        pickupBatchRestoredLedger, saves, "pickup-batch-slot");
+    pickupBatchHost.failCleanup.clear();
+    check(pickupBatchResumed.reconcileDeleted(pickupBatchHost, pickupB),
+          "pickup batch cleanup after restart");
+    auto pickupBatchReplay = pickupBatchResumed.pickupBatch(
+        pickupBatchHost, pickups, "player", "pickup-batch-1",
+        "pickup/two-woods");
+    check(pickupBatchReplay
+          && pickupBatchReplay->status == WorldCommitStatus::AlreadyCommitted
+          && pickupBatchHost.present.empty()
+          && pickupBatchRestored.findItem("pickup-wood-a")->location == bagA
+          && pickupBatchRestored.findItem("pickup-wood-b")->location == bagB,
+          "batch pickup replay does not transfer twice");
 
     PlacementHost placementHost;
     PlacementRequest placement{placedId, {}};

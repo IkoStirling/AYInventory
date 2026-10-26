@@ -344,6 +344,109 @@ Result<WorldCommitResult> WorldItemCommit::pickup(
                              candidate.objectId};
 }
 
+Result<WorldBatchCommitResult> WorldItemCommit::pickupBatch(
+    IDurablePickupHost& host, std::span<const WorldBatchPickup> pickups,
+    std::string_view actorId, std::string requestId,
+    std::string fingerprint, const WorldCommitExtension& extension)
+{
+    if (_requiresReload)
+        return fail<WorldBatchCommitResult>(Error::Stale,
+            "reload committed slot first");
+    if (pickups.empty() || pickups.size() > 64 || actorId.empty())
+        return fail<WorldBatchCommitResult>(Error::Invalid,
+            "batch pickup needs one actor and 1..64 objects");
+    std::set<std::string> objectIds, itemIds;
+    bool equipment = false;
+    for (const auto& pickup : pickups) {
+        const auto& candidate = pickup.candidate;
+        if (candidate.kind != InteractionCandidate::Kind::Pickup
+            || candidate.objectId.empty() || candidate.subjectId.empty()
+            || (pickup.destination.place != Place::Container
+                && pickup.destination.place != Place::Equipment)
+            || !std::isfinite(candidate.distance) || candidate.distance < 0.0)
+            return fail<WorldBatchCommitResult>(Error::Invalid,
+                "invalid batch pickup identity");
+        if (!objectIds.insert(candidate.objectId).second
+            || !itemIds.insert(candidate.subjectId).second)
+            return fail<WorldBatchCommitResult>(Error::Duplicate,
+                "batch repeats a World object or item");
+        equipment |= pickup.destination.place == Place::Equipment;
+    }
+    if (equipment && (!extension.prepareCandidate
+        || !extension.registerCandidateSections
+        || !extension.publishCandidate))
+        return fail<WorldBatchCommitResult>(Error::Invalid,
+            "batch equipment pickup needs a staged durable projection");
+    auto nextLedger = _ledger;
+    const auto claim = nextLedger.claimReceiptWithFingerprint(
+        requestId, std::move(fingerprint));
+    if (auto result = receiptError(claim); !result)
+        return std::unexpected(result.error());
+    using Claim = app::WorldStateLedger::ReceiptClaimResult;
+    if (claim == Claim::Replay) {
+        for (const auto& pickup : pickups) {
+            const auto& candidate = pickup.candidate;
+            const auto record = _ledger.records().find(candidate.objectId);
+            const auto* item = _store.findItem(candidate.subjectId);
+            if (record == _ledger.records().end() || !record->second.deleted
+                || !item || item->location != pickup.destination)
+                return fail<WorldBatchCommitResult>(Error::Stale,
+                    "batch pickup replay differs from committed ownership");
+        }
+        WorldBatchCommitResult replay{WorldCommitStatus::AlreadyCommitted, {}};
+        for (const auto& pickup : pickups) {
+            const auto cleaned = callHost([&] {
+                return host.cleanupCommittedPickup(pickup.candidate);
+            }, "batch pickup replay cleanup");
+            if (!cleaned)
+                replay.pendingObjectIds.push_back(pickup.candidate.objectId);
+        }
+        if (!replay.pendingObjectIds.empty())
+            replay.status = WorldCommitStatus::ProjectionPending;
+        return replay;
+    }
+    Store nextStore = _store;
+    for (std::size_t i = 0; i < pickups.size(); ++i) {
+        const auto& pickup = pickups[i];
+        const auto& candidate = pickup.candidate;
+        if (auto moved = nextStore.transfer(candidate.subjectId,
+                {Place::World, candidate.objectId, {}},
+                pickup.destination,
+                requestId + "/item/" + std::to_string(i)); !moved)
+            return std::unexpected(moved.error());
+        if (auto valid = callHost([&] {
+                return host.validateCurrent(candidate, actorId);
+            }, "batch pickup validation"); !valid)
+            return std::unexpected(valid.error());
+        if (auto authorized = callHost([&] {
+                return host.authorize(candidate, actorId);
+            }, "batch pickup authorization"); !authorized)
+            return std::unexpected(authorized.error());
+        std::string error;
+        if (!nextLedger.markDeleted(candidate.objectId, &error))
+            return fail<WorldBatchCommitResult>(Error::Invalid, error);
+    }
+    if (auto saved = saveCandidate(nextStore, nextLedger, extension); !saved)
+        return std::unexpected(saved.error());
+    if (!publishCandidate(nextStore, nextLedger, extension)) {
+        WorldBatchCommitResult reload{WorldCommitStatus::ReloadRequired, {}};
+        for (const auto& pickup : pickups)
+            reload.pendingObjectIds.push_back(pickup.candidate.objectId);
+        return reload;
+    }
+    WorldBatchCommitResult committed{WorldCommitStatus::Committed, {}};
+    for (const auto& pickup : pickups) {
+        const auto cleaned = callHost([&] {
+            return host.cleanupCommittedPickup(pickup.candidate);
+        }, "batch pickup cleanup");
+        if (!cleaned)
+            committed.pendingObjectIds.push_back(pickup.candidate.objectId);
+    }
+    if (!committed.pendingObjectIds.empty())
+        committed.status = WorldCommitStatus::ProjectionPending;
+    return committed;
+}
+
 Result<WorldCommitResult> WorldItemCommit::place(
     IPlacementHost& host, std::string_view itemId, const Location& source,
     PlacementRequest request, std::string requestId,

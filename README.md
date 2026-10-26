@@ -118,6 +118,11 @@ Store，保存失败不留下半次交换；读档后的精确请求重试不会
 同一槽；每件物品/世界对象 ID 必须唯一。放置 Host 逐个预检当前 World，批内
 旋转盒的轴对齐包围盒相交时保守拒绝。写槽后逐件发布；部分失败列出待补建 ID，
 重启后逐个调用 `reconcilePlaced`，精确请求重放不会再次转移物品。
+`pickupBatch` 对 1～64 个当前掉落做相同的同槽候选提交；逐个重验与授权后
+一次保存所有归属和墓碑，保存后逐个清理旧 Entity。局部清理失败列出对象 ID，
+重启后用 `reconcileDeleted` 补做；直接进入装备槽时仍要求完整装备效果扩展。
+Host 必须能独立验证批内每个目标；仅沿当前视线确定一个焦点的
+`ScenePhysicsHost3D` 通常只能验证一件，区域拾取需游戏提供适合批量的 Host。
 直接拾取到装备槽时，必须提供 `WorldCommitExtension`：其
 `prepareCandidate` 用候选 Store 暂存 Stats/Ability 装备投影，
 `registerCandidateSections` 把这些结果纳入同槽，`publishCandidate`
@@ -136,7 +141,7 @@ Runtime；多个角色或额外游戏节由组合根统一安排节名和完整�
 返回失败时核心 Store/Ledger 仍保持旧值。
 已有槽中的节集合若与本次候选不同会拒绝写入，避免遗漏任务等游戏状态；
 增加或删除节需要显式迁移。
-批量入口只处理已有物品放置；多件拾取、批量制作和跨槽提交尚需游戏编排。
+批量入口处理已有物品的拾取/放置；批量制作和跨槽提交尚需游戏编排。
 同槽的其他任务/奖励候选由游戏注册。外部通知
 意图可用 `AYApplication::DurableOutbox` 在 `WorldCommitExtension` 中暂存并作为
 额外节同槽保存，槽写成功后才投递；接收端按稳定键去重，确认后再次保存。

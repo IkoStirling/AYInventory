@@ -30,6 +30,11 @@ struct WorldBatchPlacement {
     std::string contentSignature;
 };
 
+struct WorldBatchPickup {
+    InteractionCandidate candidate;
+    Location destination;
+};
+
 struct WorldBatchCommitResult {
     WorldCommitStatus status = WorldCommitStatus::Committed;
     std::vector<std::string> pendingObjectIds;
@@ -69,6 +74,19 @@ public:
         IDurablePickupHost& host, const InteractionCandidate& candidate,
         std::string_view actorId, const Location& destination,
         std::string requestId, std::string fingerprint,
+        const WorldCommitExtension& extension = {});
+
+    /// Stage 1..64 current drops for one actor as one Store/tombstone receipt
+    /// and slot write. Every item and object ID must be unique. Cleanup runs
+    /// only after the slot succeeds and any failed IDs can be reconciled with
+    /// reconcileDeleted. The supplied Host must independently validate every
+    /// target; a single-focus ray Host generally handles only one target per
+    /// call. Direct equipment destinations require the same full durable
+    /// projection extension as pickup().
+    [[nodiscard]] Result<WorldBatchCommitResult> pickupBatch(
+        IDurablePickupHost& host, std::span<const WorldBatchPickup> pickups,
+        std::string_view actorId, std::string requestId,
+        std::string fingerprint,
         const WorldCommitExtension& extension = {});
 
     /// Check occupancy before saving, but publish the object only after the
