@@ -305,6 +305,69 @@ void runDurableSceneCommit()
           "one item owner agrees with rebuilt World");
     fs::remove_all(root, ec);
 }
+
+void runDurableBatchSceneCommit()
+{
+    namespace fs = std::filesystem;
+    const fs::path root = fs::path(AY_INVENTORY_SCENE_TEST_ROOT) / "batch-commit";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    check(fs::create_directories(root, ec), "batch scene directory");
+    ayt::app::SaveGameService saves({root.string(), "scene-batch-commit"});
+    auto makeBatchStore = [] {
+        auto created = Store::create(1, {{"wood", 1}});
+        check(created, "scene batch catalog");
+        auto value = std::move(*created);
+        check(value.addContainer({"player/bag", {"a", "b"}}),
+              "scene batch bag");
+        return value;
+    };
+    auto store = makeBatchStore();
+    const Location a{Place::Container, "player/bag", "a"};
+    const Location b{Place::Container, "player/bag", "b"};
+    check(store.createItem({"batch-a", "wood", 1, a}), "scene batch first item");
+    check(store.createItem({"batch-b", "wood", 1, b}), "scene batch second item");
+    ayt::app::WorldStateLedger ledger;
+    ayt::scene::Scene active(ayt::scene::SceneMode::Play);
+    Query query;
+    auto host = makeHost(active, query, store);
+    std::vector<WorldBatchPlacement> placements{
+        {"batch-a", a, {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {}}, {}},
+        {"batch-b", b, {"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", {}}, {}}
+    };
+    placements[0].request.pose.position = {2.0, 0.0, 0.0};
+    placements[1].request.pose.position = {5.0, 0.0, 0.0};
+    WorldItemCommit commit(store, ledger, saves, "slot");
+    auto placed = commit.placeBatch(host, placements, "scene-batch-place",
+                                     "scene/batch/two-items");
+    check(placed && placed->status == WorldCommitStatus::Committed
+          && placed->pendingObjectIds.empty(), "scene batch published");
+    for (const auto& placement : placements)
+        check(active.world().findEntityByPersistentId(
+                  placement.request.worldObjectId) != nullptr,
+              "scene batch active Entity exists");
+
+    ayt::scene::Scene rebuilt(ayt::scene::SceneMode::Play);
+    auto restored = makeBatchStore();
+    ayt::app::WorldStateLedger restoredLedger;
+    check(restoreWorldItemCommitSlot(restored, restoredLedger, saves, "slot"),
+          "scene batch restart slot");
+    auto rebuiltHost = makeHost(rebuilt, query, restored);
+    WorldItemCommit resumed(restored, restoredLedger, saves, "slot");
+    for (const auto& placement : placements)
+        check(resumed.reconcilePlaced(rebuiltHost,
+            placement.request.worldObjectId), "scene batch rebuild Entity");
+    check(rebuilt.world().findEntityByPersistentId(
+              placements[0].request.worldObjectId) != nullptr
+          && rebuilt.world().findEntityByPersistentId(
+              placements[1].request.worldObjectId) != nullptr
+          && restored.findItem("batch-a")->location
+              == Location{Place::World, placements[0].request.worldObjectId, {}}
+          && restored.findItem("batch-b")->location
+              == Location{Place::World, placements[1].request.worldObjectId, {}},
+          "scene batch restored World and ownership agree");
+    fs::remove_all(root, ec);
+}
 } // namespace
 
 int main()
@@ -312,6 +375,7 @@ int main()
     try {
         run();
         runDurableSceneCommit();
+        runDurableBatchSceneCommit();
         std::cout << "AYInventory: Scene pickup, tombstone and placement restore passed\n";
     } catch (const std::exception& error) {
         std::cerr << "AYInventory Scene restore: " << error.what() << '\n';

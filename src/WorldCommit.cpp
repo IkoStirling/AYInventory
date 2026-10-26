@@ -5,6 +5,7 @@
 
 #include <cmath>
 #include <exception>
+#include <set>
 #include <utility>
 
 namespace ayt::inventory {
@@ -37,6 +38,34 @@ bool validPose(const PlacementPose& pose)
     for (double value : pose.halfExtents)
         if (!std::isfinite(value) || value <= 0.0) return false;
     return std::abs(norm - 1.0) <= 0.001;
+}
+
+std::array<double, 3> envelopeExtents(const PlacementPose& pose)
+{
+    const auto& q = pose.rotation;
+    const double x = q[0], y = q[1], z = q[2], w = q[3];
+    const std::array<std::array<double, 3>, 3> rotation{{
+        {1 - 2 * (y*y + z*z), 2 * (x*y - z*w), 2 * (x*z + y*w)},
+        {2 * (x*y + z*w), 1 - 2 * (x*x + z*z), 2 * (y*z - x*w)},
+        {2 * (x*z - y*w), 2 * (y*z + x*w), 1 - 2 * (x*x + y*y)}
+    }};
+    std::array<double, 3> result{};
+    for (std::size_t axis = 0; axis < 3; ++axis)
+        for (std::size_t component = 0; component < 3; ++component)
+            result[axis] += std::abs(rotation[axis][component])
+                * pose.halfExtents[component];
+    return result;
+}
+
+bool overlappingEnvelopes(const PlacementPose& a, const PlacementPose& b)
+{
+    const auto ea = envelopeExtents(a), eb = envelopeExtents(b);
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(ea[axis]) || !std::isfinite(eb[axis])) return true;
+        if (std::abs(a.position[axis] - b.position[axis])
+                >= ea[axis] + eb[axis]) return false;
+    }
+    return true;
 }
 
 std::string placementPayload(std::string_view itemId,
@@ -387,6 +416,112 @@ Result<WorldCommitResult> WorldItemCommit::place(
     host.commitPublished();
     return WorldCommitResult{WorldCommitStatus::Committed,
                              request.worldObjectId};
+}
+
+Result<WorldBatchCommitResult> WorldItemCommit::placeBatch(
+    IPlacementHost& host, std::span<const WorldBatchPlacement> placements,
+    std::string requestId, std::string fingerprint,
+    const WorldCommitExtension& extension)
+{
+    if (_requiresReload)
+        return fail<WorldBatchCommitResult>(Error::Stale,
+            "reload committed slot first");
+    if (placements.empty() || placements.size() > 64)
+        return fail<WorldBatchCommitResult>(Error::Invalid,
+            "batch placement requires 1..64 objects");
+    std::set<std::string> itemIds, objectIds;
+    for (std::size_t i = 0; i < placements.size(); ++i) {
+        const auto& placement = placements[i];
+        if (placement.itemId.empty()
+            || placement.source.place != Place::Container
+            || placement.request.worldObjectId.empty()
+            || !validPose(placement.request.pose))
+            return fail<WorldBatchCommitResult>(Error::Invalid,
+                "invalid batch placement identity or pose");
+        if (!itemIds.insert(placement.itemId).second
+            || !objectIds.insert(placement.request.worldObjectId).second)
+            return fail<WorldBatchCommitResult>(Error::Duplicate,
+                "batch repeats an item or World object ID");
+        for (std::size_t j = 0; j < i; ++j)
+            if (overlappingEnvelopes(placement.request.pose,
+                                     placements[j].request.pose))
+                return fail<WorldBatchCommitResult>(Error::Occupied,
+                    "batch placement envelopes overlap");
+    }
+    auto nextLedger = _ledger;
+    const auto claim = nextLedger.claimReceiptWithFingerprint(
+        requestId, std::move(fingerprint));
+    if (auto result = receiptError(claim); !result)
+        return std::unexpected(result.error());
+    using Claim = app::WorldStateLedger::ReceiptClaimResult;
+    if (claim == Claim::Replay) {
+        for (const auto& placement : placements) {
+            const auto record = _ledger.records().find(
+                placement.request.worldObjectId);
+            const auto* item = _store.findItem(placement.itemId);
+            if (record == _ledger.records().end() || record->second.deleted
+                || record->second.payloadJson != placementPayload(
+                    placement.itemId, placement.request.pose)
+                || !item || item->location != Location{Place::World,
+                    placement.request.worldObjectId, {}})
+                return fail<WorldBatchCommitResult>(Error::Stale,
+                    "batch replay differs from the committed objects");
+        }
+        WorldBatchCommitResult replay{WorldCommitStatus::AlreadyCommitted, {}};
+        for (const auto& placement : placements)
+            if (!reconcilePlaced(host, placement.request.worldObjectId))
+                replay.pendingObjectIds.push_back(
+                    placement.request.worldObjectId);
+        if (!replay.pendingObjectIds.empty())
+            replay.status = WorldCommitStatus::ProjectionPending;
+        return replay;
+    }
+
+    Store nextStore = _store;
+    for (std::size_t i = 0; i < placements.size(); ++i) {
+        const auto& placement = placements[i];
+        const auto& objectId = placement.request.worldObjectId;
+        if (_ledger.records().contains(objectId))
+            return fail<WorldBatchCommitResult>(Error::Duplicate,
+                "batch would reuse a saved World object ID");
+        if (auto moved = nextStore.transfer(placement.itemId,
+                placement.source, {Place::World, objectId, {}},
+                requestId + "/item/" + std::to_string(i)); !moved)
+            return std::unexpected(moved.error());
+        std::string error;
+        if (!nextLedger.putRecord(objectId,
+                {1, placementPayload(placement.itemId,
+                                     placement.request.pose), false,
+                 placement.contentSignature}, &error))
+            return fail<WorldBatchCommitResult>(Error::Invalid, error);
+    }
+    // Check the current World before saving. The conservative envelope check
+    // above also catches collisions among the not-yet-visible batch members.
+    for (const auto& placement : placements) {
+        const auto* item = nextStore.findItem(placement.itemId);
+        auto prepared = callHost([&] {
+            return host.prepare(placement.request, *item);
+        }, "batch placement preparation");
+        host.abort();
+        if (!prepared) return std::unexpected(prepared.error());
+    }
+    if (auto saved = saveCandidate(nextStore, nextLedger, extension); !saved)
+        return std::unexpected(saved.error());
+    if (!publishCandidate(nextStore, nextLedger, extension)) {
+        WorldBatchCommitResult reload{WorldCommitStatus::ReloadRequired, {}};
+        for (const auto& placement : placements)
+            reload.pendingObjectIds.push_back(
+                placement.request.worldObjectId);
+        return reload;
+    }
+    WorldBatchCommitResult committed{WorldCommitStatus::Committed, {}};
+    for (const auto& placement : placements)
+        if (!reconcilePlaced(host, placement.request.worldObjectId))
+            committed.pendingObjectIds.push_back(
+                placement.request.worldObjectId);
+    if (!committed.pendingObjectIds.empty())
+        committed.status = WorldCommitStatus::ProjectionPending;
+    return committed;
 }
 
 Result<WorldCommitResult> WorldItemCommit::craftAndPlace(

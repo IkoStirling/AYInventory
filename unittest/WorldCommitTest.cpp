@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <optional>
 #include <stdexcept>
 
 using namespace ayt::inventory;
@@ -94,6 +96,36 @@ struct PlacementHost final : IPlacementHost {
         return {};
     }
     void abort() noexcept override { prepared = false; }
+};
+
+struct BatchPlacementHost final : IPlacementHost {
+    std::map<std::string, std::string> published;
+    std::optional<std::pair<std::string, std::string>> prepared;
+    std::string failObject;
+    Result<void> verifyPublished(const PlacementRequest& request,
+                                 const Item& item) override
+    {
+        const auto found = published.find(request.worldObjectId);
+        if (found != published.end() && found->second == item.id) return {};
+        return std::unexpected(Diagnostic{Error::Stale, "not published"});
+    }
+    Result<void> prepare(const PlacementRequest& request,
+                         const Item& item) override
+    {
+        if (published.contains(request.worldObjectId))
+            return std::unexpected(Diagnostic{Error::Duplicate, "occupied"});
+        prepared = std::pair{request.worldObjectId, item.id};
+        return {};
+    }
+    Result<void> publish() override
+    {
+        if (!prepared || prepared->first == failObject)
+            return std::unexpected(Diagnostic{Error::Stale, "publish failed"});
+        published.emplace(*prepared);
+        prepared.reset();
+        return {};
+    }
+    void abort() noexcept override { prepared.reset(); }
 };
 
 void run()
@@ -316,6 +348,81 @@ void run()
           && craftReplay->status == WorldCommitStatus::AlreadyCommitted
           && craftRestored.findItem("wood-3")->quantity == 1,
           "craft retry does not consume material");
+
+    auto batchCatalog = [] {
+        auto made = Store::create(2, {{"wood", 1}});
+        check(made, "batch catalog");
+        auto value = std::move(*made);
+        check(value.addContainer({"batch-bag", {"a", "b"}}), "batch bag");
+        return value;
+    };
+    auto batchStore = batchCatalog();
+    const Location batchA{Place::Container, "batch-bag", "a"};
+    const Location batchB{Place::Container, "batch-bag", "b"};
+    check(batchStore.createItem({"batch-wood-a", "wood", 1, batchA}),
+          "first batch item");
+    check(batchStore.createItem({"batch-wood-b", "wood", 1, batchB}),
+          "second batch item");
+    ayt::app::WorldStateLedger batchLedger;
+    BatchPlacementHost batchHost;
+    std::vector<WorldBatchPlacement> placements{
+        {"batch-wood-a", batchA, {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {}}, {}},
+        {"batch-wood-b", batchB, {"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", {}}, {}}
+    };
+    placements[1].request.pose.position = {3.0, 0.0, 0.0};
+    WorldItemCommit blockedBatch(batchStore, batchLedger, blockedSave,
+                                  "batch-slot");
+    check(!blockedBatch.placeBatch(batchHost, placements, "batch-place-1",
+        "batch/two-woods"), "batch save fault");
+    check(batchStore.findItem("batch-wood-a")->location == batchA
+          && batchStore.findItem("batch-wood-b")->location == batchB
+          && batchLedger.records().empty() && batchHost.published.empty(),
+          "failed batch save leaves both items and World old");
+    auto overlap = placements;
+    overlap[1].request.pose.position = {0.5, 0.0, 0.0};
+    WorldItemCommit batchCommit(batchStore, batchLedger, saves, "batch-slot");
+    check(!batchCommit.placeBatch(batchHost, overlap, "batch-overlap",
+        "batch/overlap"), "overlapping batch rejected");
+    check(batchLedger.records().empty(), "overlap does not claim receipt");
+    batchHost.failObject = placements[1].request.worldObjectId;
+    auto batchPlaced = batchCommit.placeBatch(batchHost, placements,
+        "batch-place-1", "batch/two-woods");
+    check(batchPlaced
+          && batchPlaced->status == WorldCommitStatus::ProjectionPending
+          && batchPlaced->pendingObjectIds
+              == std::vector<std::string>{placements[1].request.worldObjectId},
+          "batch persists both items but reports one missing projection");
+    check(batchStore.findItem("batch-wood-a")->location
+              == Location{Place::World, placements[0].request.worldObjectId, {}}
+          && batchStore.findItem("batch-wood-b")->location
+              == Location{Place::World, placements[1].request.worldObjectId, {}}
+          && batchLedger.hasReceipt("batch-place-1")
+          && batchHost.published.size() == 1u,
+          "batch values and receipt committed once");
+    auto restartedBatchStore = batchCatalog();
+    ayt::app::WorldStateLedger restartedBatchLedger;
+    check(restoreWorldItemCommitSlot(restartedBatchStore,
+        restartedBatchLedger, saves, "batch-slot"), "batch slot restart");
+    WorldItemCommit restartedBatch(restartedBatchStore,
+                                    restartedBatchLedger, saves, "batch-slot");
+    batchHost.failObject.clear();
+    check(restartedBatch.reconcilePlaced(batchHost,
+        placements[1].request.worldObjectId), "repair missing batch object");
+    check(batchHost.published.size() == 2u, "both batch objects projected");
+    auto batchReplay = restartedBatch.placeBatch(batchHost, placements,
+        "batch-place-1", "batch/two-woods");
+    check(batchReplay
+          && batchReplay->status == WorldCommitStatus::AlreadyCommitted
+          && batchReplay->pendingObjectIds.empty()
+          && batchHost.published.size() == 2u,
+          "batch replay neither transfers nor duplicates objects");
+    auto alteredBatch = placements;
+    alteredBatch[1].request.pose.position = {4.0, 0.0, 0.0};
+    check(!restartedBatch.placeBatch(batchHost, alteredBatch,
+        "batch-place-1", "batch/two-woods"),
+        "same fingerprint cannot replay a different saved placement");
+    check(!restartedBatch.placeBatch(batchHost, placements,
+        "batch-place-1", "changed-batch"), "batch receipt conflict");
 
     auto reloadStore = makeStore();
     check(reloadStore.createItem({"wood-4", "wood", 1, world}),

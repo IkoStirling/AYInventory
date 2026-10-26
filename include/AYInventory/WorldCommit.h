@@ -6,6 +6,8 @@
 #include <AYApplication/WorldStateLedger.h>
 
 #include <functional>
+#include <span>
+#include <vector>
 
 namespace ayt::inventory {
 
@@ -19,6 +21,18 @@ enum class WorldCommitStatus {
 struct WorldCommitResult {
     WorldCommitStatus status = WorldCommitStatus::Committed;
     std::string objectId;
+};
+
+struct WorldBatchPlacement {
+    std::string itemId;
+    Location source;
+    PlacementRequest request;
+    std::string contentSignature;
+};
+
+struct WorldBatchCommitResult {
+    WorldCommitStatus status = WorldCommitStatus::Committed;
+    std::vector<std::string> pendingObjectIds;
 };
 
 /// Optional game-owned candidate sections, such as progression or a quest
@@ -65,6 +79,18 @@ public:
         IPlacementHost& host, std::string_view itemId, const Location& source,
         PlacementRequest request, std::string requestId,
         std::string fingerprint, std::string contentSignature = {},
+        const WorldCommitExtension& extension = {});
+
+    /// Save 1..64 existing items and live World records as one request.
+    /// Every item and stable object ID must be unique. Each placement is
+    /// preflighted against the current World; overlapping batch envelopes
+    /// are conservatively rejected. After one slot write, publish each
+    /// object; failures list IDs to reconcilePlaced after restart. The Host
+    /// must make each publish failure-atomic. Exact replay cannot spend or
+    /// transfer again and retries only missing World projections.
+    [[nodiscard]] Result<WorldBatchCommitResult> placeBatch(
+        IPlacementHost& host, std::span<const WorldBatchPlacement> placements,
+        std::string requestId, std::string fingerprint,
         const WorldCommitExtension& extension = {});
 
     /// Reserve and consume authored materials in the candidate Store, create
