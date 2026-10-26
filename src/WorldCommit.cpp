@@ -202,6 +202,23 @@ Result<void> receiptError(app::WorldStateLedger::ReceiptClaimResult claim)
         return fail<void>(Error::Stale, "cannot allocate durable receipt");
     return {};
 }
+
+bool hasExactBatchTransferSet(const Store& store,
+                              std::string_view requestId,
+                              std::size_t count)
+{
+    const auto receipts = store.snapshot().completedTransfers;
+    const std::string prefix = std::string(requestId) + "/item/";
+    std::size_t found = 0;
+    for (const auto& [key, fingerprint] : receipts) {
+        (void)fingerprint;
+        if (key.starts_with(prefix)) ++found;
+    }
+    if (found != count) return false;
+    for (std::size_t i = 0; i < count; ++i)
+        if (!receipts.contains(prefix + std::to_string(i))) return false;
+    return true;
+}
 } // namespace
 
 WorldItemCommit::WorldItemCommit(Store& store, app::WorldStateLedger& ledger,
@@ -384,6 +401,9 @@ Result<WorldBatchCommitResult> WorldItemCommit::pickupBatch(
         return std::unexpected(result.error());
     using Claim = app::WorldStateLedger::ReceiptClaimResult;
     if (claim == Claim::Replay) {
+        if (!hasExactBatchTransferSet(_store, requestId, pickups.size()))
+            return fail<WorldBatchCommitResult>(Error::Stale,
+                "batch pickup replay member count differs");
         for (const auto& pickup : pickups) {
             const auto& candidate = pickup.candidate;
             const auto record = _ledger.records().find(candidate.objectId);
@@ -558,6 +578,10 @@ Result<WorldBatchCommitResult> WorldItemCommit::placeBatch(
         return std::unexpected(result.error());
     using Claim = app::WorldStateLedger::ReceiptClaimResult;
     if (claim == Claim::Replay) {
+        if (!hasExactBatchTransferSet(_store, requestId,
+                                      placements.size()))
+            return fail<WorldBatchCommitResult>(Error::Stale,
+                "batch placement replay member count differs");
         for (const auto& placement : placements) {
             const auto record = _ledger.records().find(
                 placement.request.worldObjectId);

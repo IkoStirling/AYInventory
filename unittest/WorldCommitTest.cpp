@@ -275,6 +275,10 @@ void run()
           && pickupBatchRestored.findItem("pickup-wood-a")->location == bagA
           && pickupBatchRestored.findItem("pickup-wood-b")->location == bagB,
           "batch pickup replay does not transfer twice");
+    check(!pickupBatchResumed.pickupBatch(pickupBatchHost,
+        std::span<const WorldBatchPickup>(pickups.data(), 1),
+        "player", "pickup-batch-1", "pickup/two-woods"),
+        "subset cannot replay a committed pickup batch");
 
     PlacementHost placementHost;
     PlacementRequest placement{placedId, {}};
@@ -529,6 +533,10 @@ void run()
           && batchReplay->pendingObjectIds.empty()
           && batchHost.published.size() == 2u,
           "batch replay neither transfers nor duplicates objects");
+    check(!restartedBatch.placeBatch(batchHost,
+        std::span<const WorldBatchPlacement>(placements.data(), 1),
+        "batch-place-1", "batch/two-woods"),
+        "subset cannot replay a committed placement batch");
     auto alteredBatch = placements;
     alteredBatch[1].request.pose.position = {4.0, 0.0, 0.0};
     check(!restartedBatch.placeBatch(batchHost, alteredBatch,
