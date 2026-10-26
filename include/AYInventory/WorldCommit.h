@@ -30,6 +30,14 @@ struct WorldBatchPlacement {
     std::string contentSignature;
 };
 
+struct WorldBatchCraft {
+    Recipe recipe;
+    std::string sourceContainerId;
+    std::string outputItemId;
+    PlacementRequest request;
+    std::string contentSignature;
+};
+
 struct WorldBatchPickup {
     InteractionCandidate candidate;
     Location destination;
@@ -120,6 +128,18 @@ public:
         std::string_view sourceContainerId, std::string craftRequestId,
         std::string outputItemId, PlacementRequest request,
         std::string fingerprint, std::string contentSignature = {},
+        const WorldCommitExtension& extension = {});
+
+    /// Commit 1..64 authored recipes and World outputs in one Store/World slot.
+    /// Each output has a distinct stable item/object ID and its own child
+    /// craft receipt, derived from requestId. The supplied fingerprint must
+    /// bind the complete ordered recipes, sources, outputs and poses. Existing
+    /// matching child holds are used; newly reserved materials remain only in
+    /// the candidate until the save succeeds. Batch envelopes may not overlap.
+    /// Failed World projection lists object IDs for reconcilePlaced.
+    [[nodiscard]] Result<WorldBatchCommitResult> craftBatchAndPlace(
+        IPlacementHost& host, std::span<const WorldBatchCraft> crafts,
+        std::string requestId, std::string fingerprint,
         const WorldCommitExtension& extension = {});
 
     /// Reconcile a saved tombstone against a rebuilt or still-live World.

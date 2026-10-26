@@ -465,6 +465,87 @@ void run()
           && craftReplay->status == WorldCommitStatus::AlreadyCommitted
           && craftRestored.findItem("wood-3")->quantity == 1,
           "craft retry does not consume material");
+    auto changedSingleCraft = craftRequest;
+    changedSingleCraft.pose.position[0] += 1.0;
+    check(!craftResumed.craftAndPlace(craftHost, recipe, "craft-bag",
+        "craft-1", "campfire-1", changedSingleCraft,
+        "craft/campfire/5"),
+        "single craft replay rejects a changed World projection");
+
+    auto multiCraftCatalog = [] {
+        auto made = Store::create(2, {{"wood", 10}, {"campfire", 1}});
+        check(made, "multi-craft catalog");
+        auto value = std::move(*made);
+        check(value.addContainer({"workshop", {"a"}}),
+              "multi-craft material container");
+        return value;
+    };
+    auto multiCraftStore = multiCraftCatalog();
+    check(multiCraftStore.createItem({"workshop-wood", "wood", 5,
+        {Place::Container, "workshop", "a"}}),
+        "stock two recipes in one material stack");
+    ayt::app::WorldStateLedger multiCraftLedger;
+    BatchPlacementHost multiCraftHost;
+    const Recipe multiRecipe{"campfire-v1", {{"wood", 2}}, "campfire", 1};
+    std::vector<WorldBatchCraft> crafts{
+        {multiRecipe, "workshop", "campfire-a",
+            {"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {}}, "recipe-v1"},
+        {multiRecipe, "workshop", "campfire-b",
+            {"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", {}}, "recipe-v1"}};
+    crafts[0].request.pose.position = {5.0, 0.0, 0.0};
+    crafts[1].request.pose.position = {9.0, 0.0, 0.0};
+    WorldItemCommit blockedMultiCraft(multiCraftStore, multiCraftLedger,
+        blockedSave, "multi-craft-slot");
+    check(!blockedMultiCraft.craftBatchAndPlace(multiCraftHost, crafts,
+        "multi-craft-1", "two-campfires-v1"),
+        "multi-output craft rejects failed slot save");
+    check(multiCraftStore.findItem("workshop-wood")->quantity == 5
+          && !multiCraftStore.findItem("campfire-a")
+          && !multiCraftLedger.hasReceipt("multi-craft-1")
+          && multiCraftHost.published.empty(),
+          "failed batch craft preserves materials and World");
+    multiCraftHost.failObject = crafts[1].request.worldObjectId;
+    WorldItemCommit multiCraftCommit(multiCraftStore, multiCraftLedger,
+        saves, "multi-craft-slot");
+    const auto multiCrafted = multiCraftCommit.craftBatchAndPlace(
+        multiCraftHost, crafts, "multi-craft-1", "two-campfires-v1");
+    check(multiCrafted
+          && multiCrafted->status == WorldCommitStatus::ProjectionPending
+          && multiCrafted->pendingObjectIds.size() == 1
+          && multiCrafted->pendingObjectIds[0]
+              == crafts[1].request.worldObjectId
+          && multiCraftStore.findItem("workshop-wood")->quantity == 1
+          && multiCraftStore.findItem("campfire-a")
+          && multiCraftStore.findItem("campfire-b")
+          && multiCraftStore.findCraftReceipt("multi-craft-1/craft/0")
+          && multiCraftStore.findCraftReceipt("multi-craft-1/craft/1"),
+          "one slot commits both recipes despite one pending projection");
+    auto restoredMultiCraft = multiCraftCatalog();
+    ayt::app::WorldStateLedger restoredMultiCraftLedger;
+    check(restoreWorldItemCommitSlot(restoredMultiCraft,
+        restoredMultiCraftLedger, saves, "multi-craft-slot"),
+        "restart multi-output craft slot");
+    WorldItemCommit resumedMultiCraft(restoredMultiCraft,
+        restoredMultiCraftLedger, saves, "multi-craft-slot");
+    multiCraftHost.failObject.clear();
+    check(resumedMultiCraft.reconcilePlaced(multiCraftHost,
+        crafts[1].request.worldObjectId),
+        "rebuild pending batch craft World object");
+    const auto multiReplay = resumedMultiCraft.craftBatchAndPlace(
+        multiCraftHost, crafts, "multi-craft-1", "two-campfires-v1");
+    check(multiReplay
+          && multiReplay->status == WorldCommitStatus::AlreadyCommitted
+          && restoredMultiCraft.findItem("workshop-wood")->quantity == 1,
+          "restarted batch craft replay does not spend again");
+    check(!resumedMultiCraft.craftBatchAndPlace(multiCraftHost,
+        std::span<const WorldBatchCraft>(crafts.data(), 1),
+        "multi-craft-1", "two-campfires-v1"),
+        "batch craft replay rejects omitted output");
+    auto changedCrafts = crafts;
+    changedCrafts[1].request.pose.position[0] += 1.0;
+    check(!resumedMultiCraft.craftBatchAndPlace(multiCraftHost,
+        changedCrafts, "multi-craft-1", "two-campfires-v1"),
+        "batch craft replay rejects changed World pose");
 
     auto batchCatalog = [] {
         auto made = Store::create(2, {{"wood", 1}});

@@ -219,6 +219,23 @@ bool hasExactBatchTransferSet(const Store& store,
         if (!receipts.contains(prefix + std::to_string(i))) return false;
     return true;
 }
+
+bool hasExactBatchCraftSet(const Store& store,
+                           std::string_view requestId,
+                           std::size_t count)
+{
+    const auto receipts = store.snapshot().completedCrafts;
+    const std::string prefix = std::string(requestId) + "/craft/";
+    std::size_t found = 0;
+    for (const auto& [key, receipt] : receipts) {
+        (void)receipt;
+        if (key.starts_with(prefix)) ++found;
+    }
+    if (found != count) return false;
+    for (std::size_t i = 0; i < count; ++i)
+        if (!receipts.contains(prefix + std::to_string(i))) return false;
+    return true;
+}
 } // namespace
 
 WorldItemCommit::WorldItemCommit(Store& store, app::WorldStateLedger& ledger,
@@ -674,17 +691,24 @@ Result<WorldCommitResult> WorldItemCommit::craftAndPlace(
     if (claim == Claim::Replay) {
         const auto record = _ledger.records().find(request.worldObjectId);
         const auto* owned = _store.findItem(outputItemId);
-        if (record != _ledger.records().end() && !record->second.deleted
-            && owned && owned->location
-                == Location{Place::World, request.worldObjectId, {}}) {
-            auto reconciled = reconcilePlaced(host, request.worldObjectId);
-            return WorldCommitResult{reconciled
-                ? WorldCommitStatus::AlreadyCommitted
-                : WorldCommitStatus::ProjectionPending,
-                request.worldObjectId};
-        }
-        return WorldCommitResult{WorldCommitStatus::AlreadyCommitted,
-                                 request.worldObjectId};
+        const auto* craftReceipt = _store.findCraftReceipt(craftRequestId);
+        const Location destination{Place::World, request.worldObjectId, {}};
+        if (record == _ledger.records().end() || record->second.deleted
+            || record->second.payloadJson != placementPayload(outputItemId,
+                request.pose)
+            || record->second.contentSignature != contentSignature
+            || !owned || owned->location != destination
+            || owned->definitionId != recipe.outputDefinitionId
+            || owned->quantity != recipe.outputQuantity
+            || !craftReceipt || craftReceipt->outputItemId != outputItemId
+            || craftReceipt->destination != destination)
+            return fail<WorldCommitResult>(Error::Stale,
+                "craft replay differs from the committed output");
+        auto reconciled = reconcilePlaced(host, request.worldObjectId);
+        return WorldCommitResult{reconciled
+            ? WorldCommitStatus::AlreadyCommitted
+            : WorldCommitStatus::ProjectionPending,
+            request.worldObjectId};
     }
     if (_ledger.records().contains(request.worldObjectId))
         return fail<WorldCommitResult>(Error::Duplicate,
@@ -729,6 +753,124 @@ Result<WorldCommitResult> WorldItemCommit::craftAndPlace(
     host.commitPublished();
     return WorldCommitResult{WorldCommitStatus::Committed,
                              request.worldObjectId};
+}
+
+Result<WorldBatchCommitResult> WorldItemCommit::craftBatchAndPlace(
+    IPlacementHost& host, std::span<const WorldBatchCraft> crafts,
+    std::string requestId, std::string fingerprint,
+    const WorldCommitExtension& extension)
+{
+    if (_requiresReload)
+        return fail<WorldBatchCommitResult>(Error::Stale,
+            "reload committed slot first");
+    if (crafts.empty() || crafts.size() > 64 || requestId.empty()
+        || requestId.size() > 220)
+        return fail<WorldBatchCommitResult>(Error::Invalid,
+            "batch craft requires 1..64 outputs and a bounded request ID");
+    std::set<std::string> itemIds, objectIds;
+    for (std::size_t i = 0; i < crafts.size(); ++i) {
+        const auto& craft = crafts[i];
+        if (craft.sourceContainerId.empty()
+            || craft.outputItemId.empty()
+            || craft.request.worldObjectId.empty()
+            || !validPose(craft.request.pose))
+            return fail<WorldBatchCommitResult>(Error::Invalid,
+                "invalid batch craft source, output or pose");
+        if (!itemIds.insert(craft.outputItemId).second
+            || !objectIds.insert(craft.request.worldObjectId).second)
+            return fail<WorldBatchCommitResult>(Error::Duplicate,
+                "batch craft repeats an item or World object ID");
+        for (std::size_t j = 0; j < i; ++j)
+            if (overlappingEnvelopes(craft.request.pose,
+                                     crafts[j].request.pose))
+                return fail<WorldBatchCommitResult>(Error::Occupied,
+                    "batch craft output envelopes overlap");
+    }
+    auto nextLedger = _ledger;
+    const auto claim = nextLedger.claimReceiptWithFingerprint(
+        requestId, std::move(fingerprint));
+    if (auto result = receiptError(claim); !result)
+        return std::unexpected(result.error());
+    using Claim = app::WorldStateLedger::ReceiptClaimResult;
+    if (claim == Claim::Replay) {
+        if (!hasExactBatchCraftSet(_store, requestId, crafts.size()))
+            return fail<WorldBatchCommitResult>(Error::Stale,
+                "batch craft replay member count differs");
+        for (std::size_t i = 0; i < crafts.size(); ++i) {
+            const auto& craft = crafts[i];
+            const auto childId = requestId + "/craft/" + std::to_string(i);
+            const auto* receipt = _store.findCraftReceipt(childId);
+            const auto* item = _store.findItem(craft.outputItemId);
+            const auto record = _ledger.records().find(
+                craft.request.worldObjectId);
+            const Location destination{Place::World,
+                craft.request.worldObjectId, {}};
+            if (!receipt || receipt->outputItemId != craft.outputItemId
+                || receipt->destination != destination
+                || !item || item->location != destination
+                || item->definitionId != craft.recipe.outputDefinitionId
+                || item->quantity != craft.recipe.outputQuantity
+                || record == _ledger.records().end() || record->second.deleted
+                || record->second.payloadJson != placementPayload(
+                    craft.outputItemId, craft.request.pose)
+                || record->second.contentSignature != craft.contentSignature)
+                return fail<WorldBatchCommitResult>(Error::Stale,
+                    "batch craft replay differs from committed outputs");
+        }
+        WorldBatchCommitResult replay{WorldCommitStatus::AlreadyCommitted, {}};
+        for (const auto& craft : crafts)
+            if (!reconcilePlaced(host, craft.request.worldObjectId))
+                replay.pendingObjectIds.push_back(
+                    craft.request.worldObjectId);
+        if (!replay.pendingObjectIds.empty())
+            replay.status = WorldCommitStatus::ProjectionPending;
+        return replay;
+    }
+    Store nextStore = _store;
+    for (std::size_t i = 0; i < crafts.size(); ++i) {
+        const auto& craft = crafts[i];
+        const auto& objectId = craft.request.worldObjectId;
+        if (_ledger.records().contains(objectId))
+            return fail<WorldBatchCommitResult>(Error::Duplicate,
+                "batch craft would reuse a saved World object ID");
+        const auto childId = requestId + "/craft/" + std::to_string(i);
+        if (auto reserved = nextStore.reserveCraft(craft.recipe,
+                craft.sourceContainerId, childId); !reserved)
+            return std::unexpected(reserved.error());
+        if (auto crafted = nextStore.commitCraft(childId,
+                craft.outputItemId, {Place::World, objectId, {}}); !crafted)
+            return std::unexpected(crafted.error());
+        std::string error;
+        if (!nextLedger.putRecord(objectId,
+                {1, placementPayload(craft.outputItemId,
+                    craft.request.pose), false, craft.contentSignature},
+                &error))
+            return fail<WorldBatchCommitResult>(Error::Invalid, error);
+    }
+    for (const auto& craft : crafts) {
+        const auto* item = nextStore.findItem(craft.outputItemId);
+        auto prepared = callHost([&] {
+            return host.prepare(craft.request, *item);
+        }, "batch craft placement preparation");
+        host.abort();
+        if (!prepared) return std::unexpected(prepared.error());
+    }
+    if (auto saved = saveCandidate(nextStore, nextLedger, extension); !saved)
+        return std::unexpected(saved.error());
+    if (!publishCandidate(nextStore, nextLedger, extension)) {
+        WorldBatchCommitResult reload{WorldCommitStatus::ReloadRequired, {}};
+        for (const auto& craft : crafts)
+            reload.pendingObjectIds.push_back(craft.request.worldObjectId);
+        return reload;
+    }
+    WorldBatchCommitResult committed{WorldCommitStatus::Committed, {}};
+    for (const auto& craft : crafts)
+        if (!reconcilePlaced(host, craft.request.worldObjectId))
+            committed.pendingObjectIds.push_back(
+                craft.request.worldObjectId);
+    if (!committed.pendingObjectIds.empty())
+        committed.status = WorldCommitStatus::ProjectionPending;
+    return committed;
 }
 
 Result<void> WorldItemCommit::reconcileDeleted(
