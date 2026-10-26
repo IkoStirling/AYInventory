@@ -192,6 +192,137 @@ int main()
         check(restoredStats.read(s::statId("attack"))->effective == 10
             && !restoredAbility.equipped(hero)->has_value(),
             "restored projection removes equipment effects exactly once");
+
+        auto groupStore = [] {
+            i::Definition swordDefinition;
+            swordDefinition.id = "sword";
+            swordDefinition.equipSlots = {"hand"};
+            swordDefinition.abilityConfiguration = 101;
+            swordDefinition.statBonuses = {{s::statId("attack"), 5}};
+            auto built = i::Store::create(1, {swordDefinition});
+            check(built, "group item catalog");
+            auto value = std::move(*built);
+            check(value.addEquipmentOwner({"alpha", {"hand"}})
+                && value.addEquipmentOwner({"beta", {"hand"}})
+                && value.createItem({"sword-a", "sword", 1,
+                    {i::Place::World,
+                     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", {}}})
+                && value.createItem({"sword-b", "sword", 1,
+                    {i::Place::World,
+                     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", {}}}),
+                "two World swords and equipment owners");
+            return value;
+        };
+        auto partyStore = groupStore();
+        ayt::app::WorldStateLedger partyLedger;
+        auto alphaStats = stats(), betaStats = stats();
+        a::Runtime partyAbility(catalog());
+        const a::Identity alpha{1,10,1}, beta{1,20,1};
+        auto alphaProjection = i::EquipmentProjection::create(alpha, 1);
+        auto betaProjection = i::EquipmentProjection::create(beta, 1);
+        check(alphaProjection && betaProjection, "group projections");
+        i::WorldEquipmentGroupCommitAdapter partyAdapter(partyAbility,
+            {{&alphaStats, &*alphaProjection, "alpha", "sword-a", factory},
+             {&betaStats, &*betaProjection, "beta", "sword-b", factory}},
+            "party-equipment");
+        const std::vector<i::WorldBatchPickup> pickups{
+            {{i::InteractionCandidate::Kind::Pickup,
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "sword-a", 1.0},
+             {i::Place::Equipment, "alpha", "hand"}},
+            {{i::InteractionCandidate::Kind::Pickup,
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "sword-b", 1.0},
+             {i::Place::Equipment, "beta", "hand"}}};
+        PickupHost partyHost;
+        i::WorldItemCommit blockedParty(partyStore, partyLedger,
+            unavailable, "party-slot");
+        check(!blockedParty.pickupBatch(partyHost, pickups, "leader",
+            "equip-party", "party/equipment-v1", partyAdapter.extension())
+            && partyStore.findItem("sword-a")->location.place
+                == i::Place::World
+            && partyStore.findItem("sword-b")->location.place
+                == i::Place::World
+            && alphaStats.read(s::statId("attack"))->effective == 10
+            && betaStats.read(s::statId("attack"))->effective == 10,
+            "group save failure keeps all actors and items unchanged");
+        i::WorldItemCommit partyCommit(partyStore, partyLedger,
+            saves, "party-slot");
+        const auto groupPicked = partyCommit.pickupBatch(partyHost,
+            pickups, "leader", "equip-party", "party/equipment-v1",
+            partyAdapter.extension());
+        check(groupPicked
+            && groupPicked->status == i::WorldCommitStatus::Committed
+            && alphaStats.read(s::statId("attack"))->effective == 15
+            && betaStats.read(s::statId("attack"))->effective == 15
+            && partyAbility.equipped(alpha)->has_value()
+            && partyAbility.equipped(beta)->has_value(),
+            "one slot publishes both Stats and one shared Ability runtime");
+
+        auto reloadedPartyStore = groupStore();
+        ayt::app::WorldStateLedger reloadedPartyLedger;
+        auto reloadedAlphaStats = stats(), reloadedBetaStats = stats();
+        a::Runtime reloadedPartyAbility(catalog());
+        auto reloadedAlphaProjection = i::EquipmentProjection::create(alpha, 1);
+        auto reloadedBetaProjection = i::EquipmentProjection::create(beta, 1);
+        check(reloadedAlphaProjection && reloadedBetaProjection,
+              "restart group projections");
+        i::WorldEquipmentGroupCommitAdapter wrongPartyAdapter(
+            reloadedPartyAbility,
+            {{&reloadedAlphaStats, &*reloadedAlphaProjection,
+                "alpha", "sword-a", factory},
+             {&reloadedBetaStats, &*reloadedBetaProjection,
+                "beta", "sword-b", wrong}}, "party-equipment");
+        check(!i::restoreWorldItemCommitSlot(reloadedPartyStore,
+            reloadedPartyLedger, saves, "party-slot",
+            [&](ayt::app::SaveParticipantBundle& bundle,
+                std::string& error) {
+                return wrongPartyAdapter.registerRestoreSections(
+                    bundle, error);
+            }, {},
+            [&](const i::Store& candidate,
+                const ayt::app::WorldStateLedger& candidateLedger,
+                std::string& error) {
+                return wrongPartyAdapter.prepareRestored(candidate,
+                    candidateLedger, error);
+            }, [&](std::string& error) {
+                return wrongPartyAdapter.publishRestoredChecked(error);
+            })
+            && reloadedPartyStore.findItem("sword-a")->location.place
+                == i::Place::World
+            && reloadedPartyStore.findItem("sword-b")->location.place
+                == i::Place::World
+            && reloadedAlphaStats.read(s::statId("attack"))->effective == 10
+            && reloadedBetaStats.read(s::statId("attack"))->effective == 10,
+            "second actor policy mismatch rejects whole group restore");
+        i::WorldEquipmentGroupCommitAdapter restoredPartyAdapter(
+            reloadedPartyAbility,
+            {{&reloadedAlphaStats, &*reloadedAlphaProjection,
+                "alpha", "sword-a", factory},
+             {&reloadedBetaStats, &*reloadedBetaProjection,
+                "beta", "sword-b", factory}}, "party-equipment");
+        check(i::restoreWorldItemCommitSlot(reloadedPartyStore,
+            reloadedPartyLedger, saves, "party-slot",
+            [&](ayt::app::SaveParticipantBundle& bundle,
+                std::string& error) {
+                return restoredPartyAdapter.registerRestoreSections(
+                    bundle, error);
+            }, {},
+            [&](const i::Store& candidate,
+                const ayt::app::WorldStateLedger& candidateLedger,
+                std::string& error) {
+                return restoredPartyAdapter.prepareRestored(candidate,
+                    candidateLedger, error);
+            }, [&](std::string& error) {
+                return restoredPartyAdapter.publishRestoredChecked(error);
+            }), "restart both equipment owners from one slot");
+        check(reloadedPartyStore.findItem("sword-a")->location
+                == pickups[0].destination
+            && reloadedPartyStore.findItem("sword-b")->location
+                == pickups[1].destination
+            && reloadedAlphaStats.read(s::statId("attack"))->effective == 15
+            && reloadedBetaStats.read(s::statId("attack"))->effective == 15
+            && reloadedPartyAbility.equipped(alpha)->has_value()
+            && reloadedPartyAbility.equipped(beta)->has_value(),
+            "restart restores both Stats and shared Ability once");
         fs::remove_all(root, ec);
         std::cout << "AYInventory: durable equipment pickup and restart passed\n";
         return 0;

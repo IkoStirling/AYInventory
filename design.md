@@ -158,7 +158,11 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   校验失败不发布。`restoreWorldItemCommitSlot` 的 `prepareAdditional` 在
   核心发布前看到完整候选，`publishAdditionalChecked` 必须失败原子化，成功后
   核心 Store/Ledger 才做 noexcept swap。该适配只负责一名角色与一套完整
-  Ability Runtime；更广的角色集合及其他游戏节由组合根持久化。
+  Ability Runtime。`WorldEquipmentGroupCommitAdapter` 对按角色 ID 排序的最多
+  32 名角色逐个复制并同步 Stats/Projection 候选，所有角色共享一份 Ability 候选；
+  保存时每名角色一个 Stats 节加一个共享 Ability 节。恢复先解码所有节并按恢复的
+  Store/Ability 逐名 `adoptRestored`，任一角色失败就不发布任何活状态；发布只交换
+  一次 Ability 和全部已验证 Stats/Projection。其他游戏节由组合根持久化。
 - 放置将物品请求的稳定世界 ID 直接用作 Entity 持久 ID，因此具体适配要求 32 位
   小写十六进制 ID。`prepare` 与 `publish` 用当前 overlapBox 检查旋转盒占用，
   拒绝占用和重复 ID；`publish` 创建 Spatial Entity、世界姿态、静态 3D 刚体和盒碰撞描述。

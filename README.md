@@ -137,7 +137,10 @@ Ability 状态存为两个节。恢复时依次注册节、对已恢复 Store �
 `prepareRestored`、通过 `publishRestoredChecked` 发布；
 `EquipmentProjection::adoptRestored` 会从同槽的所有权、修正值和 Ability 状态
 重建其非持久策略状态，不重复叠加数值。该适配一次负责一个角色及一套 Ability
-Runtime；多个角色或额外游戏节由组合根统一安排节名和完整槽内容。
+Runtime。`WorldEquipmentGroupCommitAdapter` 接受按稳定角色 ID 排序的 1～32 个
+角色，把每名角色的完整 Stats 写入独立具名节，只把共享的完整 Ability Runtime
+写入一个节。它在一个候选上逐名同步装备投影，读档时逐名核对；任一角色不一致则
+拒绝整槽恢复。额外游戏节仍由组合根安排。
 游戏状态节的发布若失败会返回 `ReloadRequired`，此时停止新操作并从该槽恢复。
 `restoreWorldItemCommitSlot` 可在发布前调用 `prepareAdditional` 校验已恢复的
 完整候选 Store/Ledger，再由 `publishAdditionalChecked` 发布外部值状态；该回调
