@@ -200,7 +200,8 @@ void run()
     ayt::app::WorldStateLedger factLedger;
     PickupHost factHost;
     int activeFact = 0;
-    const WorldCommitExtension factExtension{
+    WorldCommitExtension factExtension;
+    factExtension.registerCandidateSections =
         [](ayt::app::SaveParticipantBundle& bundle, std::string& error) {
             ayt::app::SaveParticipantBundle::Participant fact;
             fact.version = 1;
@@ -214,8 +215,9 @@ void run()
                 return true;
             };
             return bundle.registerParticipant("progression", std::move(fact), &error);
-        },
-        [&activeFact](std::string&) { activeFact = 1; return true; }};
+        };
+    factExtension.publishCandidate =
+        [&activeFact](std::string&) { activeFact = 1; return true; };
     const InteractionCandidate factPickup{InteractionCandidate::Kind::Pickup,
                                            objectId, "wood-2", 1.0};
     WorldItemCommit factCommit(factStore, factLedger, saves, "fact-slot");
@@ -388,6 +390,108 @@ void run()
     check(foreignStore.findItem("wood-5")->location == world
           && foreignHost.present && !foreignLedger.hasReceipt("foreign-pickup"),
           "foreign slot refusal keeps active states old");
+
+    Definition sword;
+    sword.id = "sword";
+    sword.equipSlots = {"hand"};
+    auto equipCatalog = [&] {
+        auto made = Store::create(3, {sword});
+        check(made, "equip catalog");
+        auto value = std::move(*made);
+        check(value.addEquipmentOwner({"hero", {"hand"}}), "hero equipment");
+        return value;
+    };
+    auto equipStore = equipCatalog();
+    check(equipStore.createItem({"sword-1", "sword", 1, world}),
+          "world equipment item");
+    ayt::app::WorldStateLedger equipLedger;
+    PickupHost equipHost;
+    const Location heroHand{Place::Equipment, "hero", "hand"};
+    const InteractionCandidate equipPickup{InteractionCandidate::Kind::Pickup,
+                                            objectId, "sword-1", 1.0};
+    int stagedEquip = 0, activeEquip = 0;
+    WorldCommitExtension equipExtension;
+    equipExtension.prepareCandidate = [&](const Store& candidate,
+        const ayt::app::WorldStateLedger&, std::string& error) {
+        const auto* item = candidate.findItem("sword-1");
+        if (!item || item->location != heroHand) {
+            error = "equipment projection saw wrong owner";
+            return false;
+        }
+        stagedEquip = 1;
+        return true;
+    };
+    equipExtension.registerCandidateSections = [&](ayt::app::SaveParticipantBundle& bundle,
+                                                   std::string& error) {
+        ayt::app::SaveParticipantBundle::Participant section;
+        section.version = 1;
+        section.capture = [&](std::string& payload, std::string&) {
+            payload = std::to_string(stagedEquip);
+            return true;
+        };
+        section.validate = [](std::uint32_t, std::string_view, std::string&) {
+            return true;
+        };
+        section.apply = [](std::uint32_t, std::string_view, std::string&) {
+            return true;
+        };
+        return bundle.registerParticipant("equipment", std::move(section), &error);
+    };
+    equipExtension.publishCandidate = [&](std::string&) {
+        activeEquip = stagedEquip;
+        return true;
+    };
+    WorldItemCommit withoutProjection(equipStore, equipLedger, saves,
+                                       "equip-slot");
+    check(!withoutProjection.pickup(equipHost, equipPickup, "hero", heroHand,
+        "equip-pickup", "equip/sword-1"),
+        "direct equipment pickup requires a durable projection");
+    WorldItemCommit blockedEquip(equipStore, equipLedger, blockedSave,
+                                  "equip-slot");
+    check(!blockedEquip.pickup(equipHost, equipPickup, "hero", heroHand,
+        "equip-pickup", "equip/sword-1", equipExtension),
+        "equipment save fault");
+    check(equipStore.findItem("sword-1")->location == world
+          && activeEquip == 0 && equipHost.present,
+          "failed equipment save does not publish projection");
+    WorldItemCommit equipped(equipStore, equipLedger, saves, "equip-slot");
+    check(equipped.pickup(equipHost, equipPickup, "hero", heroHand,
+        "equip-pickup", "equip/sword-1", equipExtension),
+        "world equipment pickup");
+    check(equipStore.findItem("sword-1")->location == heroHand
+          && activeEquip == 1 && !equipHost.present
+          && equipLedger.hasReceipt("equip-pickup"),
+          "equipment, World tombstone and receipt commit together");
+    auto restoredEquipStore = equipCatalog();
+    check(restoredEquipStore.createItem({"sword-1", "sword", 1, world}),
+          "equipment restore template");
+    ayt::app::WorldStateLedger restoredEquipLedger;
+    int stagedRestoredEquip = 0, publishedRestoredEquip = 0;
+    check(restoreWorldItemCommitSlot(restoredEquipStore, restoredEquipLedger,
+        saves, "equip-slot",
+        [&stagedRestoredEquip](ayt::app::SaveParticipantBundle& bundle,
+                               std::string& error) {
+            ayt::app::SaveParticipantBundle::Participant section;
+            section.version = 1;
+            section.capture = [](std::string& payload, std::string&) {
+                payload = "0"; return true;
+            };
+            section.validate = [](std::uint32_t version,
+                std::string_view payload, std::string&) {
+                return version == 1 && payload == "1";
+            };
+            section.apply = [&stagedRestoredEquip](std::uint32_t,
+                std::string_view, std::string&) {
+                stagedRestoredEquip = 1; return true;
+            };
+            return bundle.registerParticipant("equipment", std::move(section),
+                                              &error);
+        }, [&] { publishedRestoredEquip = stagedRestoredEquip; }),
+        "equipment slot restart");
+    check(restoredEquipStore.findItem("sword-1")->location == heroHand
+          && publishedRestoredEquip == 1
+          && restoredEquipLedger.hasReceipt("equip-pickup"),
+          "equipment projection and owner survive restart");
 #if defined(AY_WORLD_COMMIT_WITH_PROGRESSION)
     namespace progression = ayt::progression;
     progression::Definition quest;

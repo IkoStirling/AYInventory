@@ -114,6 +114,10 @@ Store，保存失败不留下半次交换；读档后的精确请求重试不会
 `reconcileDeleted` / `reconcilePlaced` 补齐 World 投影；不会再次转移物品。
 `craftAndPlace` 可在同一候选里预留并扣除配方材料、生成一个世界输出；
 保存失败不扣料，保存成功后的投影失败可在重启后补建。
+直接拾取到装备槽时，必须提供 `WorldCommitExtension`：其
+`prepareCandidate` 用候选 Store 暂存 Stats/Ability 装备投影，
+`registerCandidateSections` 把这些结果纳入同槽，`publishCandidate`
+在写槽后发布。缺少完整扩展会拒绝此次直接装备；游戏可先拾取到容器后另行装备。
 游戏状态节的发布若失败会返回 `ReloadRequired`，此时停止新操作并从该槽恢复。
 已有槽中的节集合若与本次候选不同会拒绝写入，避免遗漏任务等游戏状态；
 增加或删除节需要显式迁移。

@@ -187,6 +187,10 @@ Result<void> WorldItemCommit::saveCandidate(const Store& candidateStore,
     app::SaveParticipantBundle bundle;
     std::string error;
     try {
+        if (extension.prepareCandidate
+            && !extension.prepareCandidate(candidateStore, candidateLedger,
+                                           error))
+            return fail<void>(Error::Stale, "candidate preparation: " + error);
         if (!registerCaptureSections(bundle, candidateStore, candidateLedger, error)
             || (extension.registerCandidateSections
                 && !extension.registerCandidateSections(bundle, error)))
@@ -256,9 +260,17 @@ Result<WorldCommitResult> WorldItemCommit::pickup(
         return fail<WorldCommitResult>(Error::Stale, "reload committed slot first");
     if (candidate.kind != InteractionCandidate::Kind::Pickup
         || candidate.objectId.empty() || candidate.subjectId.empty()
-        || actorId.empty() || destination.place != Place::Container
+        || actorId.empty()
+        || (destination.place != Place::Container
+            && destination.place != Place::Equipment)
         || !std::isfinite(candidate.distance) || candidate.distance < 0.0)
         return fail<WorldCommitResult>(Error::Invalid, "invalid pickup identity");
+    if (destination.place == Place::Equipment
+        && (!extension.prepareCandidate
+            || !extension.registerCandidateSections
+            || !extension.publishCandidate))
+        return fail<WorldCommitResult>(Error::Invalid,
+            "direct equipment pickup needs a staged durable projection");
     auto nextLedger = _ledger;
     const auto claim = nextLedger.claimReceiptWithFingerprint(
         requestId, std::move(fingerprint));

@@ -128,6 +128,11 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   在 AYProgression 可用的组合构建中，集成测试把一个已完成任务的领取状态
   作为额外候选节，与世界拾取、对象墓碑和指纹收据同槽保存；保存失败不领取，
   读档后四者一致且重复请求不再领取。
+  世界物品可直接进入装备槽，但必须由 `WorldCommitExtension::prepareCandidate`
+  从候选 Store 暂存受影响角色的 Stats/Ability 投影，注册完整持久节并在写槽后
+  发布；缺少任一步都会在改动活动 Store 前拒绝。模块测试用游戏效果节验证
+  保存失败不装备和重启后一致性；具体 Stats/Ability 状态编码及选择策略归
+  组合根，不能把只变更 Store 的直接装备当作完整装备效果提交。
 - 放置将物品请求的稳定世界 ID 直接用作 Entity 持久 ID，因此具体适配要求 32 位
   小写十六进制 ID。`prepare` 与 `publish` 用当前 overlapBox 检查旋转盒占用，
   拒绝占用和重复 ID；`publish` 创建 Spatial Entity、世界姿态、静态 3D 刚体和盒碰撞描述。

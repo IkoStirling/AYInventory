@@ -26,6 +26,11 @@ struct WorldCommitResult {
 /// runs after the slot and core values commit. A failed publish blocks further
 /// commands until the owner reloads the complete slot into staged state.
 struct WorldCommitExtension {
+    /// Stage game-owned effects from the complete candidate Store before any
+    /// slot write. For direct World-to-equipment pickup this must include the
+    /// affected Stats/Ability projection and its durable sections.
+    std::function<bool(const Store&, const app::WorldStateLedger&,
+                       std::string&)> prepareCandidate;
     std::function<bool(app::SaveParticipantBundle&, std::string&)> registerCandidateSections;
     std::function<bool(std::string&)> publishCandidate;
 };
@@ -42,8 +47,10 @@ public:
                     const app::SaveGameService& saves, std::string slot);
 
     /// Validate a current pickup, then durably save Store ownership, the
-    /// object's tombstone and fingerprinted receipt together. World removal
-    /// happens after the slot write and is idempotently retryable.
+    /// object's tombstone and fingerprinted receipt together. Destination
+    /// may be a container or equipment slot; equipment requires a complete
+    /// WorldCommitExtension for its game-owned Stats/Ability projection.
+    /// World removal happens after the slot write and is retryable.
     [[nodiscard]] Result<WorldCommitResult> pickup(
         IDurablePickupHost& host, const InteractionCandidate& candidate,
         std::string_view actorId, const Location& destination,
