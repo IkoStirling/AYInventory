@@ -107,6 +107,12 @@ if(BUILD_TESTING)
         add_executable(AYInventoryWorldCommitTest unittest/WorldCommitTest.cpp)
         target_link_libraries(AYInventoryWorldCommitTest PRIVATE
             AYInventoryWorldCommit)
+        if(TARGET AYProgressionJson)
+            target_link_libraries(AYInventoryWorldCommitTest PRIVATE
+                AYProgressionJson)
+            target_compile_definitions(AYInventoryWorldCommitTest PRIVATE
+                AY_WORLD_COMMIT_WITH_PROGRESSION=1)
+        endif()
         target_compile_definitions(AYInventoryWorldCommitTest PRIVATE
             "AY_INVENTORY_WORLD_COMMIT_TEST_ROOT=\"${CMAKE_CURRENT_BINARY_DIR}/world-commit-test-output\"")
         add_test(NAME AYInventoryWorldCommitTest COMMAND AYInventoryWorldCommitTest)

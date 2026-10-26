@@ -1,4 +1,8 @@
 #include <AYInventory/WorldCommit.h>
+#if defined(AY_WORLD_COMMIT_WITH_PROGRESSION)
+#include <AYProgression/Progression.h>
+#include <AYProgression/SnapshotJson.h>
+#endif
 
 #include <filesystem>
 #include <fstream>
@@ -18,6 +22,13 @@ template<class T, class E> void check(const std::expected<T, E>& value,
 {
     check(value.has_value(), message);
 }
+
+#if defined(AY_WORLD_COMMIT_WITH_PROGRESSION)
+void check(const ayt::progression::Result& value, const char* message)
+{
+    check(static_cast<bool>(value), message);
+}
+#endif
 
 Store makeStore()
 {
@@ -377,6 +388,121 @@ void run()
     check(foreignStore.findItem("wood-5")->location == world
           && foreignHost.present && !foreignLedger.hasReceipt("foreign-pickup"),
           "foreign slot refusal keeps active states old");
+#if defined(AY_WORLD_COMMIT_WITH_PROGRESSION)
+    namespace progression = ayt::progression;
+    progression::Definition quest;
+    quest.id = "collect-wood";
+    quest.objectives.push_back({"picked", progression::Input::Fact,
+                                "pickup_ready", objectId, 1});
+    progression::Service activeProgress;
+    check(activeProgress.install({quest}), "progression catalog");
+    check(activeProgress.start(quest.id), "progression start");
+    check(activeProgress.recordFact({"world", 1, "pickup_ready", objectId, 1}),
+          "progression fact");
+    check(activeProgress.state(quest.id)->status
+              == progression::Status::Completed, "quest completed before claim");
+    progression::Service stagedProgress;
+    check(stagedProgress.install({quest}), "staged progression catalog");
+    check(stagedProgress.restore(activeProgress.snapshot()),
+          "stage progression snapshot");
+    check(stagedProgress.claim(quest.id), "stage quest reward claim");
+    auto progressionStore = makeStore();
+    check(progressionStore.createItem({"wood-6", "wood", 1, world}),
+          "progression world item");
+    ayt::app::WorldStateLedger progressionLedger;
+    PickupHost progressionHost;
+    const InteractionCandidate progressionPickup{
+        InteractionCandidate::Kind::Pickup, objectId, "wood-6", 1.0};
+    WorldCommitExtension progressionExtension;
+    progressionExtension.registerCandidateSections =
+        [&stagedProgress](ayt::app::SaveParticipantBundle& bundle,
+                          std::string& error) {
+            ayt::app::SaveParticipantBundle::Participant section;
+            section.version = 1;
+            section.capture = [&stagedProgress](std::string& payload,
+                                                std::string&) {
+                payload = progression::encodeSnapshotJson(
+                    stagedProgress.snapshot());
+                return true;
+            };
+            section.validate = [](std::uint32_t, std::string_view,
+                                  std::string&) { return true; };
+            section.apply = [](std::uint32_t, std::string_view,
+                               std::string&) { return true; };
+            return bundle.registerParticipant("progression", std::move(section),
+                                              &error);
+        };
+    progressionExtension.publishCandidate = [&activeProgress, &stagedProgress]
+        (std::string&) { activeProgress = std::move(stagedProgress); return true; };
+    WorldItemCommit blockedProgression(progressionStore, progressionLedger,
+                                       blockedSave, "progression-slot");
+    check(!blockedProgression.pickup(progressionHost, progressionPickup,
+        "player", bag, "pickup-quest", "pickup/quest/wood-6",
+        progressionExtension), "progression save fault");
+    check(activeProgress.state(quest.id)->status
+              == progression::Status::Completed
+          && progressionStore.findItem("wood-6")->location == world
+          && !progressionLedger.hasReceipt("pickup-quest"),
+          "failed slot leaves quest, item and receipt old");
+    WorldItemCommit progressionCommit(progressionStore, progressionLedger,
+                                      saves, "progression-slot");
+    check(progressionCommit.pickup(progressionHost, progressionPickup,
+        "player", bag, "pickup-quest", "pickup/quest/wood-6",
+        progressionExtension), "quest and pickup commit");
+    check(activeProgress.state(quest.id)->status
+              == progression::Status::Claimed
+          && progressionStore.findItem("wood-6")->location == bag
+          && progressionLedger.hasReceipt("pickup-quest"),
+          "quest, item, World and receipt share one commit");
+    auto progressionRestoredStore = makeStore();
+    check(progressionRestoredStore.createItem({"wood-6", "wood", 1, world}),
+          "quest restore template");
+    ayt::app::WorldStateLedger progressionRestoredLedger;
+    progression::Service stagedRestoredProgress;
+    check(stagedRestoredProgress.install({quest}), "quest restore catalog");
+    progression::Service publishedRestoredProgress;
+    check(publishedRestoredProgress.install({quest}), "quest published catalog");
+    check(restoreWorldItemCommitSlot(progressionRestoredStore,
+        progressionRestoredLedger, saves, "progression-slot",
+        [&stagedRestoredProgress, &quest](ayt::app::SaveParticipantBundle& bundle,
+                                         std::string& error) {
+            ayt::app::SaveParticipantBundle::Participant section;
+            section.version = 1;
+            section.capture = [](std::string& payload, std::string&) {
+                payload = "{}"; return true;
+            };
+            section.validate = [&quest](std::uint32_t version,
+                std::string_view payload, std::string& detail) {
+                if (version != 1) { detail = "quest section version"; return false; }
+                progression::Snapshot snapshot;
+                if (!progression::decodeSnapshotJson(payload, snapshot)) {
+                    detail = "quest decode"; return false;
+                }
+                progression::Service scratch;
+                if (!scratch.install({quest}) || !scratch.restore(snapshot)) {
+                    detail = "quest restore"; return false;
+                }
+                return true;
+            };
+            section.apply = [&stagedRestoredProgress](std::uint32_t,
+                std::string_view payload, std::string& detail) {
+                progression::Snapshot snapshot;
+                if (!progression::decodeSnapshotJson(payload, snapshot)
+                    || !stagedRestoredProgress.restore(snapshot)) {
+                    detail = "staged quest restore"; return false;
+                }
+                return true;
+            };
+            return bundle.registerParticipant("progression", std::move(section),
+                                              &error);
+        }, [&] { publishedRestoredProgress = std::move(stagedRestoredProgress); }),
+        "quest and item restart");
+    check(publishedRestoredProgress.state(quest.id)->status
+              == progression::Status::Claimed
+          && progressionRestoredStore.findItem("wood-6")->location == bag
+          && progressionRestoredLedger.hasReceipt("pickup-quest"),
+          "restarted quest and pickup remain claimed exactly once");
+#endif
     fs::remove_all(root, ec);
 }
 } // namespace

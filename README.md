@@ -130,6 +130,7 @@ Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 A
 实际 Host 映射顺序见 [world-host-integration.md](docs/world-host-integration.md)。
 `AYInventorySceneRestoreTest` 在支持 Scene/Physics/SaveGame 的构建中验证作者掉落
 拾取后的墓碑恢复、背包所有权、重新放置与再次读档；`AYInventoryWorldCommitTest`
-验证存档失败、投影失败、真实槽重启、请求冲突和重放。交互/放置 Host 抛异常时返回
+验证存档失败、投影失败、真实槽重启、请求冲突和重放；启用 AYProgression 时，
+还验证一次任务领取与拾取、墓碑和收据同槽提交及重启恢复。交互/放置 Host 抛异常时返回
 错误结果；放置准备或发布抛异常也会执行 `abort()`，Host 须保证失败时世界侧
 没有留下半成品。
