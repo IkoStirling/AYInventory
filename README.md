@@ -121,8 +121,10 @@ Store，保存失败不留下半次交换；读档后的精确请求重试不会
 游戏状态节的发布若失败会返回 `ReloadRequired`，此时停止新操作并从该槽恢复。
 已有槽中的节集合若与本次候选不同会拒绝写入，避免遗漏任务等游戏状态；
 增加或删除节需要显式迁移。
-此入口只处理单件拾取或放置；同槽的其他任务/奖励候选由游戏注册，外部通知
-仍需游戏提供持久 outbox。旧版缺失的退役实例 ID 历史无法从快照推断。
+此入口只处理单件拾取或放置；同槽的其他任务/奖励候选由游戏注册。外部通知
+意图可用 `AYApplication::DurableOutbox` 在 `WorldCommitExtension` 中暂存并作为
+额外节同槽保存，槽写成功后才投递；接收端按稳定键去重，确认后再次保存。
+旧版缺失的退役实例 ID 历史无法从快照推断。
 Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 AYScene Entity 与 AYPhysics 查询
 可选用 `AYInventory::World3DHost` 的 `ScenePhysicsHost3D` 连接。游戏注入当前
 `Scene::world()`、`IPhysicsQuery`、视线与权限回调；新放置对象的 ID 必须是 Entity
@@ -135,6 +137,7 @@ Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 A
 `AYInventorySceneRestoreTest` 在支持 Scene/Physics/SaveGame 的构建中验证作者掉落
 拾取后的墓碑恢复、背包所有权、重新放置与再次读档；`AYInventoryWorldCommitTest`
 验证存档失败、投影失败、真实槽重启、请求冲突和重放；启用 AYProgression 时，
-还验证一次任务领取与拾取、墓碑和收据同槽提交及重启恢复。交互/放置 Host 抛异常时返回
+还验证一次任务领取与拾取、墓碑和收据同槽提交及重启恢复，并验证制作材料、
+世界产物、实际任务事实与 outbox 意图在保存失败和重启时一致。交互/放置 Host 抛异常时返回
 错误结果；放置准备或发布抛异常也会执行 `abort()`，Host 须保证失败时世界侧
 没有留下半成品。

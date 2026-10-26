@@ -1,4 +1,5 @@
 #include <AYInventory/WorldCommit.h>
+#include <AYApplication/DurableOutbox.h>
 #if defined(AY_WORLD_COMMIT_WITH_PROGRESSION)
 #include <AYProgression/Progression.h>
 #include <AYProgression/SnapshotJson.h>
@@ -606,6 +607,164 @@ void run()
           && progressionRestoredStore.findItem("wood-6")->location == bag
           && progressionRestoredLedger.hasReceipt("pickup-quest"),
           "restarted quest and pickup remain claimed exactly once");
+
+    // A craft may finish a real quest and queue an external notification.
+    // All four value sections must reach one slot before any become live.
+    progression::Definition buildQuest;
+    buildQuest.id = "build-campfire";
+    buildQuest.objectives.push_back({"built", progression::Input::Fact,
+                                     "campfire_built", "campfire", 1});
+    progression::Service activeBuildProgress;
+    check(activeBuildProgress.install({buildQuest}), "build quest catalog");
+    check(activeBuildProgress.start(buildQuest.id), "build quest start");
+    progression::Service stagedBuildProgress;
+    ayt::app::DurableOutbox activeOutbox, stagedOutbox;
+    auto buildStore = craftCatalog();
+    check(buildStore.createItem({"build-wood", "wood", 3, craftBag}),
+          "build materials");
+    ayt::app::WorldStateLedger buildLedger;
+    PlacementHost buildHost;
+    PlacementRequest buildRequest{"44444444444444444444444444444444", {}};
+    buildRequest.pose.position = {7.0, 0.0, 0.0};
+    WorldCommitExtension buildExtension;
+    buildExtension.prepareCandidate = [&](const Store& candidate,
+        const ayt::app::WorldStateLedger& candidateLedger,
+        std::string& error) {
+        const auto* output = candidate.findItem("build-campfire-1");
+        if (!output || output->location
+                != Location{Place::World, buildRequest.worldObjectId, {}}
+            || !candidateLedger.records().contains(buildRequest.worldObjectId)) {
+            error = "missing candidate output"; return false;
+        }
+        stagedBuildProgress = progression::Service{};
+        if (!stagedBuildProgress.install({buildQuest})
+            || !stagedBuildProgress.restore(activeBuildProgress.snapshot())
+            || !stagedBuildProgress.recordFact(
+                {"craft", 1, "campfire_built", "campfire", 1})) {
+            error = "cannot stage build fact"; return false;
+        }
+        stagedOutbox = activeOutbox;
+        if (stagedOutbox.enqueue("notify:build-1", "craft/build-1",
+                R"({"event":"campfire_built"})")
+            != ayt::app::OutboxEnqueueResult::Enqueued) {
+            error = "cannot stage notification"; return false;
+        }
+        return true;
+    };
+    buildExtension.registerCandidateSections = [&](ayt::app::SaveParticipantBundle& bundle,
+                                                    std::string& error) {
+        ayt::app::SaveParticipantBundle::Participant progress;
+        progress.version = 1;
+        progress.capture = [&](std::string& payload, std::string&) {
+            payload = progression::encodeSnapshotJson(stagedBuildProgress.snapshot());
+            return true;
+        };
+        progress.validate = [](std::uint32_t, std::string_view, std::string&) {
+            return true;
+        };
+        progress.apply = [](std::uint32_t, std::string_view, std::string&) {
+            return true;
+        };
+        if (!bundle.registerParticipant("progression", std::move(progress), &error))
+            return false;
+        ayt::app::SaveParticipantBundle::Participant notification;
+        notification.version = 1;
+        notification.capture = [&](std::string& payload, std::string& detail) {
+            return stagedOutbox.encode(payload, &detail);
+        };
+        notification.validate = [](std::uint32_t, std::string_view payload,
+                                   std::string& detail) {
+            ayt::app::DurableOutbox candidate;
+            return candidate.decode(payload, &detail);
+        };
+        notification.apply = [](std::uint32_t, std::string_view, std::string&) {
+            return true;
+        };
+        return bundle.registerParticipant("outbox", std::move(notification), &error);
+    };
+    buildExtension.publishCandidate = [&](std::string&) {
+        activeBuildProgress = std::move(stagedBuildProgress);
+        activeOutbox.swap(stagedOutbox);
+        return true;
+    };
+    WorldItemCommit blockedBuild(buildStore, buildLedger, blockedSave,
+                                  "build-slot");
+    check(!blockedBuild.craftAndPlace(buildHost, recipe, "craft-bag",
+        "build-request-1", "build-campfire-1", buildRequest,
+        "craft/build-1", {}, buildExtension), "build slot failure");
+    check(buildStore.findItem("build-wood")->quantity == 3
+          && !buildStore.findItem("build-campfire-1")
+          && activeBuildProgress.state(buildQuest.id)->status
+              == progression::Status::Active
+          && activeOutbox.pending().empty() && !buildHost.present,
+          "failed build has no material, fact, World or notification effects");
+    WorldItemCommit durableBuild(buildStore, buildLedger, saves, "build-slot");
+    check(durableBuild.craftAndPlace(buildHost, recipe, "craft-bag",
+        "build-request-1", "build-campfire-1", buildRequest,
+        "craft/build-1", {}, buildExtension), "build shared slot");
+    check(buildStore.findItem("build-wood")->quantity == 1
+          && activeBuildProgress.state(buildQuest.id)->status
+              == progression::Status::Completed
+          && activeOutbox.pending().size() == 1u && buildHost.present,
+          "build materials, quest, World and notification committed");
+
+    auto restoredBuildStore = craftCatalog();
+    ayt::app::WorldStateLedger restoredBuildLedger;
+    progression::Service restoredBuildProgress;
+    check(restoredBuildProgress.install({buildQuest}), "restored build catalog");
+    ayt::app::DurableOutbox restoredOutbox;
+    check(restoreWorldItemCommitSlot(restoredBuildStore, restoredBuildLedger,
+        saves, "build-slot", [&](ayt::app::SaveParticipantBundle& bundle,
+                                  std::string& error) {
+            ayt::app::SaveParticipantBundle::Participant progress;
+            progress.version = 1;
+            progress.capture = [](std::string& payload, std::string&) {
+                payload = "{}"; return true;
+            };
+            progress.validate = [&](std::uint32_t version,
+                std::string_view payload, std::string& detail) {
+                progression::Snapshot snapshot;
+                progression::Service scratch;
+                if (version != 1 || !progression::decodeSnapshotJson(payload, snapshot)
+                    || !scratch.install({buildQuest}) || !scratch.restore(snapshot)) {
+                    detail = "invalid build quest"; return false;
+                }
+                return true;
+            };
+            progress.apply = [&](std::uint32_t, std::string_view payload,
+                                 std::string& detail) {
+                progression::Snapshot snapshot;
+                if (!progression::decodeSnapshotJson(payload, snapshot)
+                    || !restoredBuildProgress.restore(snapshot)) {
+                    detail = "cannot restore build quest"; return false;
+                }
+                return true;
+            };
+            if (!bundle.registerParticipant("progression", std::move(progress),
+                                            &error)) return false;
+            ayt::app::SaveParticipantBundle::Participant notification;
+            notification.version = 1;
+            notification.capture = [](std::string& payload, std::string&) {
+                payload = "{}"; return true;
+            };
+            notification.validate = [](std::uint32_t version,
+                std::string_view payload, std::string& detail) {
+                ayt::app::DurableOutbox scratch;
+                return version == 1 && scratch.decode(payload, &detail);
+            };
+            notification.apply = [&](std::uint32_t, std::string_view payload,
+                                     std::string& detail) {
+                return restoredOutbox.decode(payload, &detail);
+            };
+            return bundle.registerParticipant("outbox", std::move(notification),
+                                              &error);
+        }), "restore build with quest and outbox");
+    check(restoredBuildStore.findItem("build-wood")->quantity == 1
+          && restoredBuildProgress.state(buildQuest.id)->status
+              == progression::Status::Completed
+          && restoredOutbox.pending().size() == 1u
+          && restoredBuildLedger.hasReceipt("build-request-1"),
+          "restart preserves whole build commit and pending notification");
 #endif
     fs::remove_all(root, ec);
 }
