@@ -80,7 +80,7 @@ ctest --test-dir out/build/ayinventory --output-on-failure
 返回所选实例，`reservableQuantity` 查询尚未占用的数量。预留的整个实例暂时不能移动、
 拆分、合并或销毁。需要继续待办时，显式调用 `snapshotWithReservations()` 生成
 schema v8：记录制作和普通预留的请求与精确材料实例。`restore()` 在发布前校验归属和
-跨种类预留总量；不完整或超额的预留使整个恢复失败。当前恢复器可读取 v2–v8 快照；
+跨种类预留总量；不完整或超额的预留使整个恢复失败。当前恢复器可读取 v2–v9 快照；
 普通 `snapshot()` 仍保持 v6，且不保存待办预留。
 `consumeHeldItems(holdRequestId, completionRequestId)` 原子扣除已占用的全部数量，
 允许只扣除堆叠的一部分；耗尽的实例 ID 永久退役，有附属配件的父实例不可耗尽。
@@ -106,6 +106,19 @@ Store，保存失败不留下半次交换；读档后的精确请求重试不会
 游戏的 `PlacementSave` 回调把候选 Store 与放置对象记录写入同一存档槽，失败时
 `IDurablePlacementHost` 撤销刚发布的对象并保留原 Store。`ScenePhysicsHost3D`
 实现该撤销；回调必须保证保存失败不替换旧槽，读档时从同一槽重建放置对象。
+对一件世界物品的立即持久化，也可链接 `AYInventory::WorldCommit` 并使用
+`WorldItemCommit`。它把候选 Store、`WorldStateLedger` 的墓碑或放置记录、
+带指纹请求收据及可选游戏状态节写入同一个 `SaveGameService` 槽。拾取在保存后
+清理旧 Entity；放置先检查空间，保存成功后才发布新 Entity。清理或发布失败返回
+`ProjectionPending`，重启后先调用 `restoreWorldItemCommitSlot`，再用
+`reconcileDeleted` / `reconcilePlaced` 补齐 World 投影；不会再次转移物品。
+`craftAndPlace` 可在同一候选里预留并扣除配方材料、生成一个世界输出；
+保存失败不扣料，保存成功后的投影失败可在重启后补建。
+游戏状态节的发布若失败会返回 `ReloadRequired`，此时停止新操作并从该槽恢复。
+已有槽中的节集合若与本次候选不同会拒绝写入，避免遗漏任务等游戏状态；
+增加或删除节需要显式迁移。
+此入口只处理单件拾取或放置；同槽的其他任务/奖励候选由游戏注册，外部通知
+仍需游戏提供持久 outbox。旧版缺失的退役实例 ID 历史无法从快照推断。
 Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 AYScene Entity 与 AYPhysics 查询
 可选用 `AYInventory::World3DHost` 的 `ScenePhysicsHost3D` 连接。游戏注入当前
 `Scene::world()`、`IPhysicsQuery`、视线与权限回调；新放置对象的 ID 必须是 Entity
@@ -116,6 +129,7 @@ Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 A
 `AYInventoryCraftPlaceExample` 演示拾取→直接制作并放置→重复请求。详细失败语义见 [design.md](design.md)。
 实际 Host 映射顺序见 [world-host-integration.md](docs/world-host-integration.md)。
 `AYInventorySceneRestoreTest` 在支持 Scene/Physics/SaveGame 的构建中验证作者掉落
-拾取后的墓碑恢复、背包所有权、重新放置与再次读档。交互/放置 Host 抛异常时返回
+拾取后的墓碑恢复、背包所有权、重新放置与再次读档；`AYInventoryWorldCommitTest`
+验证存档失败、投影失败、真实槽重启、请求冲突和重放。交互/放置 Host 抛异常时返回
 错误结果；放置准备或发布抛异常也会执行 `abort()`，Host 须保证失败时世界侧
 没有留下半成品。

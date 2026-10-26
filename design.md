@@ -113,6 +113,18 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   以及游戏拥有的当前视线和权限回调。焦点和激活各自发起当前 raycast，按有效 3D
   刚体句柄解析 Entity，再用 `persistentId` 对应 Store 的世界物品或容器。
   拾取仅删除没有子实体的当前 Entity；任何失败都不让 Store 发布预提交转移。
+- 可选 `WorldItemCommit` 将单件拾取或放置的 Store 候选、WorldStateLedger
+  墓碑/活记录、指纹收据和可选游戏节封装为同一 SaveParticipantBundle，写一个
+  SaveGame 槽后无分配交换两个核心状态。拾取的 Entity 清理在写槽后执行；
+  放置先经 Host `prepare` 预检空间，但 `publish` 在写槽后执行。后阶段失败
+  不是事务回滚，而是 `ProjectionPending`；保存的墓碑或放置姿态驱动重启
+  `reconcileDeleted` / `reconcilePlaced`，两者对已完成投影幂等。游戏扩展节若
+  在写槽后的内存发布失败，`ReloadRequired` 阻止本协调器继续接收命令。
+  所有回调必须在同一模拟拥有者安静边界执行，不能在候选或发布回调发送
+  不可撤回的外部通知。额外游戏节必须与库存/World 一起恢复到暂存状态，
+  完整校验后发布。写已有槽前核对节名集合，不允许候选静默删除游戏节；
+  增删节由游戏显式迁移。一个操作仅含一个世界物品和一个存档槽；多实体批次、
+  多槽提交及物理中途回滚不在当前保证内。
 - 放置将物品请求的稳定世界 ID 直接用作 Entity 持久 ID，因此具体适配要求 32 位
   小写十六进制 ID。`prepare` 与 `publish` 用当前 overlapBox 检查旋转盒占用，
   拒绝占用和重复 ID；`publish` 创建 Spatial Entity、世界姿态、静态 3D 刚体和盒碰撞描述。

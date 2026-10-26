@@ -57,6 +57,20 @@ if(AY_INVENTORY_BUILD_JSON)
     endif()
 endif()
 
+if(TARGET AYApplicationSaveGame AND TARGET AYInventoryJson)
+    add_library(AYInventoryWorldCommit STATIC src/WorldCommit.cpp)
+    add_library(AYInventory::WorldCommit ALIAS AYInventoryWorldCommit)
+    target_compile_features(AYInventoryWorldCommit PUBLIC cxx_std_23)
+    target_include_directories(AYInventoryWorldCommit PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_link_libraries(AYInventoryWorldCommit PUBLIC
+        AYInventoryJson AYApplicationSaveGame
+        PRIVATE nlohmann_json::nlohmann_json)
+    if(MSVC)
+        target_compile_options(AYInventoryWorldCommit PRIVATE /W4 /utf-8)
+    endif()
+endif()
+
 if(BUILD_TESTING)
     if(TARGET AYInventoryEquipmentProjection)
         add_executable(AYInventoryEquipmentProjectionTest unittest/EquipmentProjectionTest.cpp)
@@ -90,13 +104,20 @@ if(BUILD_TESTING)
         target_compile_definitions(AYInventoryLedgerTest PRIVATE
             "AY_INVENTORY_LEDGER_TEST_ROOT=\"${CMAKE_CURRENT_BINARY_DIR}/inventory-ledger-test-output\"")
         add_test(NAME AYInventoryLedgerTest COMMAND AYInventoryLedgerTest)
+        add_executable(AYInventoryWorldCommitTest unittest/WorldCommitTest.cpp)
+        target_link_libraries(AYInventoryWorldCommitTest PRIVATE
+            AYInventoryWorldCommit)
+        target_compile_definitions(AYInventoryWorldCommitTest PRIVATE
+            "AY_INVENTORY_WORLD_COMMIT_TEST_ROOT=\"${CMAKE_CURRENT_BINARY_DIR}/world-commit-test-output\"")
+        add_test(NAME AYInventoryWorldCommitTest COMMAND AYInventoryWorldCommitTest)
     endif()
     if(TARGET AYScene AND TARGET AYApplicationSaveGame
        AND TARGET AYInventoryJson AND TARGET AYInventoryWorld3DHost)
         add_executable(AYInventorySceneRestoreTest
             unittest/InventorySceneRestoreTest.cpp)
         target_link_libraries(AYInventorySceneRestoreTest PRIVATE
-            AYInventoryWorld3DHost AYInventoryJson AYApplicationSaveGame
+            AYInventoryWorld3DHost AYInventoryWorldCommit
+            AYInventoryJson AYApplicationSaveGame
             AYScene AYEntity)
         target_compile_definitions(AYInventorySceneRestoreTest PRIVATE
             "AY_INVENTORY_SCENE_TEST_ROOT=\"${CMAKE_CURRENT_BINARY_DIR}/inventory-scene-test-output\"")

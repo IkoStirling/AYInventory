@@ -1,5 +1,6 @@
 #include <AYInventory/Inventory.h>
 #include <AYInventory/ScenePhysicsHost3D.h>
+#include <AYInventory/WorldCommit.h>
 #include <AYInventory/SnapshotJson.h>
 #include <AYApplication/SaveGameService.h>
 #include <AYApplication/WorldStateLedger.h>
@@ -233,12 +234,84 @@ void run()
     activeLedger.clearParticipants();
     fs::remove_all(root, ec);
 }
+
+void runDurableSceneCommit()
+{
+    namespace fs = std::filesystem;
+    const fs::path root = fs::path(AY_INVENTORY_SCENE_TEST_ROOT) / "commit";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    check(fs::create_directories(root, ec), "commit test directory");
+    const auto authorPath = (root / "author.ayscene").string();
+    {
+        ayt::scene::Scene author(ayt::scene::SceneMode::Edit);
+        auto* drop = author.world().createSpatialEntity();
+        check(drop && drop->restorePersistentId(dropId), "commit authored drop");
+        check(author.save(authorPath), "commit authored scene");
+    }
+    const Location worldDrop{Place::World, dropId, {}};
+    const Location bag{Place::Container, "player/bag", "slot"};
+    ayt::app::SaveGameService saves({root.string(), "scene-commit"});
+    ayt::scene::Scene active(ayt::scene::SceneMode::Play);
+    check(active.load(authorPath), "commit active scene");
+    auto* activeDrop = active.world().findEntityByPersistentId(dropId);
+    check(activeDrop != nullptr, "commit active drop");
+    auto* body = activeDrop->addComponent<ayt::entity::RigidBodyComponent>();
+    check(body != nullptr, "commit drop body");
+    body->setBodyHandle(42);
+    auto store = makeStore();
+    check(store.createItem({"wood-1", "wood", 1, worldDrop}),
+          "commit world item");
+    ayt::app::WorldStateLedger ledger;
+    Query query;
+    query.hit = {.hit = true, .body = 42, .distance = 1.0f};
+    auto host = makeHost(active, query, store);
+    auto focused = host.focus("player");
+    check(focused && *focused, "commit focus");
+    WorldItemCommit commit(store, ledger, saves, "slot");
+    auto picked = commit.pickup(host, **focused, "player", bag,
+                                "scene-pickup", "pickup/wood-1/bag");
+    check(picked && picked->status == WorldCommitStatus::Committed,
+          "commit scene pickup");
+    check(active.world().findEntityByPersistentId(dropId) == nullptr,
+          "commit scene drop removed");
+    PlacementRequest request{placedId, {}};
+    request.pose.position = {2.0, 0.0, 0.0};
+    auto placed = commit.place(host, "wood-1", bag, request,
+                               "scene-place", "place/wood-1/2");
+    check(placed && placed->status == WorldCommitStatus::Committed,
+          "commit scene placement");
+    check(active.world().findEntityByPersistentId(placedId) != nullptr,
+          "commit scene placed Entity");
+
+    ayt::scene::Scene rebuilt(ayt::scene::SceneMode::Play);
+    check(rebuilt.load(authorPath), "rebuild author scene");
+    auto restored = makeStore();
+    check(restored.createItem({"wood-1", "wood", 1, worldDrop}),
+          "restore template item");
+    ayt::app::WorldStateLedger restoredLedger;
+    check(restoreWorldItemCommitSlot(restored, restoredLedger, saves, "slot"),
+          "restore scene commit slot");
+    auto rebuiltHost = makeHost(rebuilt, query, restored);
+    WorldItemCommit resumed(restored, restoredLedger, saves, "slot");
+    check(resumed.reconcileDeleted(rebuiltHost, dropId),
+          "remove recreated authored drop");
+    check(resumed.reconcilePlaced(rebuiltHost, placedId),
+          "rebuild saved placed Entity");
+    check(rebuilt.world().findEntityByPersistentId(dropId) == nullptr
+          && rebuilt.world().findEntityByPersistentId(placedId) != nullptr
+          && restored.findItem("wood-1")->location
+              == Location{Place::World, placedId, {}},
+          "one item owner agrees with rebuilt World");
+    fs::remove_all(root, ec);
+}
 } // namespace
 
 int main()
 {
     try {
         run();
+        runDurableSceneCommit();
         std::cout << "AYInventory: Scene pickup, tombstone and placement restore passed\n";
     } catch (const std::exception& error) {
         std::cerr << "AYInventory Scene restore: " << error.what() << '\n';
