@@ -140,8 +140,17 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   世界物品可直接进入装备槽，但必须由 `WorldCommitExtension::prepareCandidate`
   从候选 Store 暂存受影响角色的 Stats/Ability 投影，注册完整持久节并在写槽后
   发布；缺少任一步都会在改动活动 Store 前拒绝。模块测试用游戏效果节验证
-  保存失败不装备和重启后一致性；具体 Stats/Ability 状态编码及选择策略归
-  组合根，不能把只变更 Store 的直接装备当作完整装备效果提交。
+  保存失败不装备和重启后一致性；装备选择、角色集合和资产目录由组合根决定，
+  不能把只变更 Store 的直接装备当作完整装备效果提交。
+  可选 `AYInventoryWorldEquipmentCommit` 把一个角色的 Stats/Ability 候选
+  直接纳入两个具名节。`WorldEquipmentCommitAdapter` 先用候选 Store 同步投影，
+  保存完整 StatSet 和 Ability Runtime checkpoint；写槽后先交换 Ability，
+  再无分配交换 Stats 与投影策略。恢复时先解码两个候选节，再以候选 Store
+  核对 Ability 物品绑定、所选装备和 Stats 修正值并重建投影内部持有集；
+  校验失败不发布。`restoreWorldItemCommitSlot` 的 `prepareAdditional` 在
+  核心发布前看到完整候选，`publishAdditionalChecked` 必须失败原子化，成功后
+  核心 Store/Ledger 才做 noexcept swap。该适配只负责一名角色与一套完整
+  Ability Runtime；更广的角色集合及其他游戏节由组合根持久化。
 - 放置将物品请求的稳定世界 ID 直接用作 Entity 持久 ID，因此具体适配要求 32 位
   小写十六进制 ID。`prepare` 与 `publish` 用当前 overlapBox 检查旋转盒占用，
   拒绝占用和重复 ID；`publish` 创建 Spatial Entity、世界姿态、静态 3D 刚体和盒碰撞描述。

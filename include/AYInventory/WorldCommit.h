@@ -136,13 +136,20 @@ private:
 
 /// Load the core sections into private candidates and publish them only after
 /// every section validates. A game with additional sections registers their
-/// staged restore callbacks and supplies a non-throwing final publication
-/// callback. World projection is reconciled separately.
+/// staged restore callbacks. prepareAdditional may validate those staged
+/// sections against the restored candidate Store/Ledger before either core
+/// value is published. publishAdditionalChecked may atomically publish
+/// prepared external value state before the noexcept core swap; it must
+/// leave live state unchanged on false. The legacy final publication callback
+/// is non-throwing. World projection is reconciled separately.
 [[nodiscard]] Result<void> restoreWorldItemCommitSlot(
     Store& store, app::WorldStateLedger& ledger,
     const app::SaveGameService& saves, std::string_view slot,
     const std::function<bool(app::SaveParticipantBundle&, std::string&)>&
         registerAdditionalSections = {},
-    const std::function<void()>& publishAdditionalSections = {});
+    const std::function<void()>& publishAdditionalSections = {},
+    const std::function<bool(const Store&, const app::WorldStateLedger&,
+                             std::string&)>& prepareAdditional = {},
+    const std::function<bool(std::string&)>& publishAdditionalChecked = {});
 
 } // namespace ayt::inventory

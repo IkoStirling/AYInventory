@@ -657,7 +657,10 @@ Result<void> restoreWorldItemCommitSlot(
     const app::SaveGameService& saves, std::string_view slot,
     const std::function<bool(app::SaveParticipantBundle&, std::string&)>&
         registerAdditionalSections,
-    const std::function<void()>& publishAdditionalSections)
+    const std::function<void()>& publishAdditionalSections,
+    const std::function<bool(const Store&, const app::WorldStateLedger&,
+                             std::string&)>& prepareAdditional,
+    const std::function<bool(std::string&)>& publishAdditionalChecked)
 {
     const auto loaded = saves.load(slot, 1);
     if (!loaded) return fail<void>(Error::Stale, "slot load: " + loaded.error);
@@ -672,6 +675,13 @@ Result<void> restoreWorldItemCommitSlot(
             return fail<void>(Error::Invalid, "restore section: " + error);
         if (!bundle.restore(loaded.payloadJson, &error))
             return fail<void>(Error::Stale, "slot restore: " + error);
+        if (prepareAdditional
+            && !prepareAdditional(nextStore, nextLedger, error))
+            return fail<void>(Error::Stale,
+                "additional restore preparation: " + error);
+        if (publishAdditionalChecked && !publishAdditionalChecked(error))
+            return fail<void>(Error::Stale,
+                "additional restore publication: " + error);
         store.swap(nextStore);
         ledger.swap(nextLedger);
         if (publishAdditionalSections) publishAdditionalSections();

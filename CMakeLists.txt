@@ -71,6 +71,33 @@ if(TARGET AYApplicationSaveGame AND TARGET AYInventoryJson)
     endif()
 endif()
 
+if(TARGET AYInventoryWorldCommit AND TARGET AYInventoryEquipmentProjection
+   AND TARGET AYStatsAssets AND TARGET AYAbilityAuthoring)
+    add_library(AYInventoryWorldEquipmentCommit STATIC
+        src/WorldEquipmentCommit.cpp)
+    add_library(AYInventory::WorldEquipmentCommit ALIAS
+        AYInventoryWorldEquipmentCommit)
+    target_compile_features(AYInventoryWorldEquipmentCommit PUBLIC cxx_std_23)
+    target_include_directories(AYInventoryWorldEquipmentCommit PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    target_link_libraries(AYInventoryWorldEquipmentCommit PUBLIC
+        AYInventoryWorldCommit AYInventoryEquipmentProjection
+        AYStatsAssets AYAbilityAuthoring)
+    if(MSVC)
+        target_compile_options(AYInventoryWorldEquipmentCommit PRIVATE /W4 /utf-8)
+    endif()
+    if(BUILD_TESTING)
+        add_executable(AYInventoryWorldEquipmentCommitTest
+            unittest/WorldEquipmentCommitTest.cpp)
+        target_link_libraries(AYInventoryWorldEquipmentCommitTest PRIVATE
+            AYInventoryWorldEquipmentCommit)
+        target_compile_definitions(AYInventoryWorldEquipmentCommitTest PRIVATE
+            "AY_INVENTORY_WORLD_EQUIPMENT_TEST_ROOT=\"${CMAKE_CURRENT_BINARY_DIR}/world-equipment-test-output\"")
+        add_test(NAME AYInventoryWorldEquipmentCommitTest
+            COMMAND AYInventoryWorldEquipmentCommitTest)
+    endif()
+endif()
+
 if(BUILD_TESTING)
     if(TARGET AYInventoryEquipmentProjection)
         add_executable(AYInventoryEquipmentProjectionTest unittest/EquipmentProjectionTest.cpp)

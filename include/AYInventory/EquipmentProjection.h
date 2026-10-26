@@ -27,6 +27,16 @@ class EquipmentProjection {
 public:
     static Result<EquipmentProjection> create(ability::Identity actor,
         ability::Id itemDomain);
+    /// Rebuild non-durable projection policy from one fully restored Store,
+    /// StatSet and Ability Runtime. Their snapshots must have come from the
+    /// same save boundary. The item domain is reserved for inventory item
+    /// instances; orphan Ability equipment or mismatched owned modifiers
+    /// reject recovery before any live state is published.
+    static Result<EquipmentProjection> adoptRestored(
+        ability::Identity actor, ability::Id itemDomain,
+        const Store& store, std::string_view actorId,
+        const stats::StatSet& stats, const ability::Runtime& ability,
+        const ModifierFactory& modifierFactory);
     /// selectedItemId must identify one currently equipped Ability item, or
     /// be empty to clear this projection's prior selection. Cross-actor
     /// transfer uses Ability::Runtime::transferEquipment on the candidate.

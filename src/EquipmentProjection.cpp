@@ -1,6 +1,7 @@
 #include <AYInventory/EquipmentProjection.h>
 
 #include <exception>
+#include <map>
 #include <set>
 #include <type_traits>
 #include <utility>
@@ -18,6 +19,94 @@ Result<EquipmentProjection> EquipmentProjection::create(
     if (!actor.valid() || itemDomain != actor.domain)
         return reject<EquipmentProjection>(Error::Invalid, "Invalid actor or item domain");
     return EquipmentProjection(actor, itemDomain);
+}
+
+Result<EquipmentProjection> EquipmentProjection::adoptRestored(
+    ability::Identity actor, ability::Id itemDomain,
+    const Store& store, std::string_view actorId,
+    const stats::StatSet& statSet, const ability::Runtime& runtime,
+    const ModifierFactory& modifierFactory) {
+    auto created = create(actor, itemDomain);
+    if (!created || actorId.empty() || !modifierFactory)
+        return reject<EquipmentProjection>(Error::Invalid,
+            "Incomplete restored equipment projection context");
+    try {
+        auto projection = std::move(*created);
+        const auto snapshot = store.snapshot();
+        std::map<ability::Id, std::string> itemBindings;
+        for (const auto& item : snapshot.items) {
+            if (item.abilityBindingId) {
+                if (!itemBindings.emplace(item.abilityBindingId, item.id).second)
+                    return reject<EquipmentProjection>(Error::Duplicate,
+                        "Duplicate restored Ability item binding");
+            }
+        }
+        auto checkpoint = runtime.checkpoint();
+        if (!checkpoint)
+            return reject<EquipmentProjection>(Error::Stale,
+                "Ability checkpoint unavailable during projection restore");
+        for (const auto& equipment : checkpoint->equipment) {
+            if (equipment.identity.domain != itemDomain
+                || equipment.owner != actor) continue;
+            const auto found = itemBindings.find(equipment.identity.object);
+            if (found == itemBindings.end()
+                || equipment.identity.generation != 1)
+                return reject<EquipmentProjection>(Error::Stale,
+                    "Orphan restored inventory Ability equipment");
+            const auto* item = store.findItem(found->second);
+            const auto* definition = item
+                ? store.findDefinition(item->definitionId) : nullptr;
+            if (!definition || definition->abilityConfiguration
+                    != equipment.configuration)
+                return reject<EquipmentProjection>(Error::Incompatible,
+                    "Restored Ability configuration differs from item");
+            projection._knownItems.emplace(item->id, equipment.identity);
+        }
+        std::set<std::uint64_t> modifierHandles;
+        std::set<ability::Identity> equippedBindings;
+        for (const auto& profile : store.equippedProfiles(actorId)) {
+            if (profile.abilityConfiguration) {
+                const ability::Identity id{itemDomain,
+                    profile.abilityBindingId, 1};
+                const auto state = runtime.equipment(id);
+                if (!id.valid() || !state || state->owner != actor
+                    || state->configuration != profile.abilityConfiguration)
+                    return reject<EquipmentProjection>(Error::Stale,
+                        "Restored equipped item has no matching Ability state");
+                equippedBindings.insert(id);
+            }
+            for (std::size_t index = 0;
+                 index < profile.statBonuses.size(); ++index) {
+                const auto modifier = modifierFactory(profile, index);
+                const auto& bonus = profile.statBonuses[index];
+                if (!modifier.handle || modifier.target != bonus.statId
+                    || modifier.value != bonus.flat
+                    || !modifierHandles.insert(modifier.handle).second)
+                    return reject<EquipmentProjection>(Error::Invalid,
+                        "Restored equipment modifier factory mismatch");
+                bool found = false;
+                for (const auto& persisted : statSet.modifiers())
+                    if (persisted == modifier) { found = true; break; }
+                if (!found)
+                    return reject<EquipmentProjection>(Error::Stale,
+                        "Restored Stats omit equipment modifier");
+                projection._ownedModifiers.push_back(modifier);
+            }
+        }
+        const auto selected = runtime.equipped(actor);
+        if (!selected)
+            return reject<EquipmentProjection>(Error::Stale,
+                "Restored Ability actor unavailable");
+        if (*selected) {
+            if (!equippedBindings.contains(**selected))
+                return reject<EquipmentProjection>(Error::Stale,
+                    "Restored Ability selection is not an equipped item");
+            projection._selected = **selected;
+        }
+        return projection;
+    } catch (const std::exception& ex) {
+        return reject<EquipmentProjection>(Error::Invalid, ex.what());
+    }
 }
 
 void EquipmentProjection::swapState(EquipmentProjection& other) noexcept {

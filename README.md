@@ -122,7 +122,18 @@ Store，保存失败不留下半次交换；读档后的精确请求重试不会
 `prepareCandidate` 用候选 Store 暂存 Stats/Ability 装备投影，
 `registerCandidateSections` 把这些结果纳入同槽，`publishCandidate`
 在写槽后发布。缺少完整扩展会拒绝此次直接装备；游戏可先拾取到容器后另行装备。
+当 Stats 与 Ability 的资产/序列化目标可用时，可链接
+`AYInventory::WorldEquipmentCommit`，用 `WorldEquipmentCommitAdapter::extension()`
+直接生成上述扩展。它在候选上运行 `EquipmentProjection::sync`，把完整 Stats 与
+Ability 状态存为两个节。恢复时依次注册节、对已恢复 Store 调用
+`prepareRestored`、通过 `publishRestoredChecked` 发布；
+`EquipmentProjection::adoptRestored` 会从同槽的所有权、修正值和 Ability 状态
+重建其非持久策略状态，不重复叠加数值。该适配一次负责一个角色及一套 Ability
+Runtime；多个角色或额外游戏节由组合根统一安排节名和完整槽内容。
 游戏状态节的发布若失败会返回 `ReloadRequired`，此时停止新操作并从该槽恢复。
+`restoreWorldItemCommitSlot` 可在发布前调用 `prepareAdditional` 校验已恢复的
+完整候选 Store/Ledger，再由 `publishAdditionalChecked` 发布外部值状态；该回调
+返回失败时核心 Store/Ledger 仍保持旧值。
 已有槽中的节集合若与本次候选不同会拒绝写入，避免遗漏任务等游戏状态；
 增加或删除节需要显式迁移。
 批量入口只处理已有物品放置；多件拾取、批量制作和跨槽提交尚需游戏编排。

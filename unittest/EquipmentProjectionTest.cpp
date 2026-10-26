@@ -74,6 +74,12 @@ int main() {
     check(bool(initial), "hero projection");
     check(heroStats.read(s::statId("attack"))->effective==15, "hero bonus");
     check(runtime.equipped(hero)->value()==swordId, "hero selected sword");
+    check(!i::EquipmentProjection::adoptRestored(hero,1,store,"hero",
+        stats(),runtime,factory), "incomplete Stats checkpoint rejected");
+    auto adopted=i::EquipmentProjection::adoptRestored(hero,1,store,"hero",
+        heroStats,runtime,factory);
+    check(bool(adopted), "adopt complete restored equipment state");
+    heroProjection=std::move(adopted);
     check(bool(runtime.fire({hero,1})), "hero shot");
     const auto ammo=runtime.equipment(swordId)->ammunition;
     check(bool(store.transfer("sword-1",heroHand,bag,"stow-1")), "stow");

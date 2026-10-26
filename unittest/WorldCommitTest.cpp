@@ -263,6 +263,30 @@ void run()
     check(factRestoredStore.createItem({"wood-2", "wood", 1, world}),
           "fact restore template");
     ayt::app::WorldStateLedger factRestoredLedger;
+    check(!restoreWorldItemCommitSlot(factRestoredStore, factRestoredLedger,
+        saves, "fact-slot", factExtension.registerCandidateSections, {},
+        [](const Store& candidate, const ayt::app::WorldStateLedger& ledger,
+           std::string& error) {
+            check(candidate.findItem("wood-2")->location
+                  == Location{Place::Container, "bag", "slot"}
+                  && ledger.hasReceipt("fact-pickup"),
+                  "prepublication sees complete candidate state");
+            error = "game-owned invariant failed";
+            return false;
+        }), "failed additional prepublication validation");
+    check(factRestoredStore.findItem("wood-2")->location == world
+          && !factRestoredLedger.hasReceipt("fact-pickup"),
+          "failed additional preparation leaves live core unchanged");
+    check(!restoreWorldItemCommitSlot(factRestoredStore, factRestoredLedger,
+        saves, "fact-slot", factExtension.registerCandidateSections, {},
+        [](const Store&, const ayt::app::WorldStateLedger&,
+           std::string&) { return true; },
+        [](std::string& error) {
+            error = "external value owner unavailable"; return false;
+        }), "checked publication failure");
+    check(factRestoredStore.findItem("wood-2")->location == world
+          && !factRestoredLedger.hasReceipt("fact-pickup"),
+          "checked publication failure leaves live core unchanged");
     int restoredFact = 0;
     int stagedFact = 0;
     check(restoreWorldItemCommitSlot(factRestoredStore, factRestoredLedger,
