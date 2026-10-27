@@ -151,6 +151,13 @@ Runtime。`WorldEquipmentGroupCommitAdapter` 接受按稳定角色 ID 排序的 
 同槽的其他任务/奖励候选由游戏注册。外部通知
 意图可用 `AYApplication::DurableOutbox` 在 `WorldCommitExtension` 中暂存并作为
 额外节同槽保存，槽写成功后才投递；接收端按稳定键去重，确认后再次保存。
+任务完成后的纯库存奖励可链接 `AYInventory::ClaimReward`，调用
+`claimInventoryRewardWithSave`。游戏提供不产生外部副作用的候选 Store 发奖规则、
+稳定奖励指纹，以及包含 Store、Progression、WorldStateLedger 和其余相关状态的
+完整同槽保存回调。入口在私有候选中领取任务、修改库存并写入按作用域/任务/
+目录签名/周期构成的指纹收据，保存成功后才发布三份状态。精确重试不会再次发奖；
+奖励内容变更冲突，已领取却没有匹配收据会拒绝。外部货币/平台奖励仍走独立的
+持久接收端或 outbox，不能从这个纯库存提交推断外部效果已完成。
 旧版缺失的退役实例 ID 历史无法从快照推断。
 Host 的拾取/发布回调必须具有文档所述的失败原子性；实际 AYScene Entity 与 AYPhysics 查询
 可选用 `AYInventory::World3DHost` 的 `ScenePhysicsHost3D` 连接。游戏注入当前

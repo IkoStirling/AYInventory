@@ -179,6 +179,19 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   不支持盒查询的后端会返回失败，不降级到较大的外接球。适配不隐式注册 Entity 组件、保存场景或实现游戏权限；调用者
   在 Sim 边界使用它，World/Store 卸载和恢复时重新注入当前实例。
 
+### 任务库存奖励的同槽提交（2026-10-27）
+
+`AYInventoryClaimReward` 在同一模拟 owner 上复制 Store、Progression Service 和
+WorldStateLedger。当前任务必须是 Completed；稳定收据键用长度前缀编码玩家作用域、
+任务 ID，再附目录签名与周期起点，限制 256 字节。游戏给出非空且至多 256 字节的
+奖励指纹。先在候选账本认领指纹收据；Exact Replay 仅在任务已经 Claimed 时成功，
+不同指纹返回 Conflict，已领取但没有匹配收据或已有收据但任务仍 Completed 均为
+Inconsistent。对于新领取，游戏规则只修改候选 Store，随后候选 Service 标记 Claimed；
+完整 SaveGame 槽成功写入后才无分配交换三个 owner。保存失败或发奖拒绝保留全部
+原值，读档后的精确重试不再次发奖。回调不允许碰外部钱包/平台服务，外部效果要
+使用持久 outbox 与接收端去重。游戏必须把所有受影响的其他状态放进同一槽，并
+在恢复时先验证全部候选再发布；此适配不负责整个游戏的槽节编排。
+
 ## 装备投影
 
 `EquipmentProjection` 是可选跨模块桥，Core 仍无 Stats/Ability 依赖。

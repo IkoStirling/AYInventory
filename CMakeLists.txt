@@ -71,6 +71,30 @@ if(TARGET AYApplicationSaveGame AND TARGET AYInventoryJson)
     endif()
 endif()
 
+if(TARGET AYApplicationSaveGame AND TARGET AYProgressionCore)
+    add_library(AYInventoryClaimReward STATIC src/ClaimRewardCommit.cpp)
+    add_library(AYInventory::ClaimReward ALIAS AYInventoryClaimReward)
+    target_compile_features(AYInventoryClaimReward PUBLIC cxx_std_23)
+    target_include_directories(AYInventoryClaimReward PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_link_libraries(AYInventoryClaimReward PUBLIC
+        AYInventoryCore AYProgressionCore AYApplicationSaveGame)
+    if(MSVC)
+        target_compile_options(AYInventoryClaimReward PRIVATE /W4 /utf-8)
+    endif()
+    if(BUILD_TESTING AND TARGET AYInventoryJson AND TARGET AYProgressionJson)
+        add_executable(AYInventoryClaimRewardTest
+            unittest/ClaimRewardCommitTest.cpp)
+        target_link_libraries(AYInventoryClaimRewardTest PRIVATE
+            AYInventoryClaimReward AYInventoryJson AYProgressionJson
+            nlohmann_json::nlohmann_json)
+        target_compile_definitions(AYInventoryClaimRewardTest PRIVATE
+            "AY_INVENTORY_CLAIM_TEST_ROOT=\"${CMAKE_CURRENT_BINARY_DIR}/claim-reward-test-output\"")
+        add_test(NAME AYInventoryClaimRewardTest
+            COMMAND AYInventoryClaimRewardTest)
+    endif()
+endif()
+
 if(TARGET AYInventoryWorldCommit AND TARGET AYInventoryEquipmentProjection
    AND TARGET AYStatsAssets AND TARGET AYAbilityAuthoring)
     add_library(AYInventoryWorldEquipmentCommit STATIC
