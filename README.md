@@ -92,6 +92,12 @@ schema v8：记录制作和普通预留的请求与精确材料实例。`restore
 不会消耗材料。完成收据和世界物品 ID 同时持久化，重复调用只核验已发布对象。
 
 `WorldTransactions.h` 接收 Host 从 3D 射线/空间查询映射出的稳定对象 ID。
+可选 `AYInventory::WorldProgressionCommit` 提供
+`WorldProgressionFactCommitAdapter`。游戏提交一条带稳定来源和递增序号的任务事实，
+并用只读规则核对候选 Store/世界账本确实包含对应操作。适配器在候选任务状态中
+记录事实、注册完整任务存档节；只有 `WorldItemCommit` 同槽保存成功后才发布。
+读档时先注册其恢复节，再把 `publishRestoredChecked` 交给整槽恢复入口。
+精确事务重试不会再次投递事实，新事务误用已消耗序号会失败。
 可选 `ScenePhysicsHost3D` 的焦点查询复用 `WorldInteraction3D`，共享当前射线、
 刚体到 Entity 和稳定对象身份核验。`InteractionView3D::ignoredBody` 可指定角色自身
 刚体；后端不支持排除时明确失败，不会退回到可能击中自身的普通射线。

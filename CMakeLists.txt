@@ -95,6 +95,31 @@ if(TARGET AYApplicationSaveGame AND TARGET AYProgressionCore)
     endif()
 endif()
 
+if(TARGET AYInventoryWorldCommit AND TARGET AYProgressionJson)
+    add_library(AYInventoryWorldProgressionCommit STATIC
+        src/WorldProgressionCommit.cpp)
+    add_library(AYInventory::WorldProgressionCommit ALIAS
+        AYInventoryWorldProgressionCommit)
+    target_compile_features(AYInventoryWorldProgressionCommit PUBLIC cxx_std_23)
+    target_include_directories(AYInventoryWorldProgressionCommit PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_link_libraries(AYInventoryWorldProgressionCommit PUBLIC
+        AYInventoryWorldCommit AYProgressionJson)
+    if(MSVC)
+        target_compile_options(AYInventoryWorldProgressionCommit PRIVATE /W4 /utf-8)
+    endif()
+    if(BUILD_TESTING)
+        add_executable(AYInventoryWorldProgressionCommitTest
+            unittest/WorldProgressionCommitTest.cpp)
+        target_link_libraries(AYInventoryWorldProgressionCommitTest PRIVATE
+            AYInventoryWorldProgressionCommit)
+        target_compile_definitions(AYInventoryWorldProgressionCommitTest PRIVATE
+            "AY_INVENTORY_WORLD_PROGRESSION_TEST_ROOT=\"${CMAKE_CURRENT_BINARY_DIR}/world-progression-test-output\"")
+        add_test(NAME AYInventoryWorldProgressionCommitTest
+            COMMAND AYInventoryWorldProgressionCommitTest)
+    endif()
+endif()
+
 if(TARGET AYInventoryWorldCommit AND TARGET AYInventoryEquipmentProjection
    AND TARGET AYStatsAssets AND TARGET AYAbilityAuthoring)
     add_library(AYInventoryWorldEquipmentCommit STATIC

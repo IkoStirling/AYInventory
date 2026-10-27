@@ -61,6 +61,12 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
 
 ## 交互、制作与放置
 
+- `WorldProgressionFactCommitAdapter` 可把一次世界事务的游戏定义 Fact 与
+  Store、WorldStateLedger 放在同一存档槽。游戏的候选规则必须核对物品/对象
+  变化，避免无关事务伪造事实；适配器复核来源序号水位，先复制 Service 并
+  `recordFact`，再提供版本化任务节，存档后以 noexcept 状态交换发布。
+  保存、规则或恢复验证失败均保留活动任务状态；读档将存档任务节恢复进
+  私有候选，通过整槽检查后发布。它不生成游戏事实、外部通知或任务奖励。
 - `chooseFocus` 接收 Host 已按当前 World 射线结果映射的候选，过滤无效/超距命中，
   以距离及稳定对象 ID 决定焦点。`activate` 不信任跨帧焦点，要求 Host 当下复核命中、
   距离和权限。拾取先复制 Store 做转移校验，调用 Host 原子移除世界掉落，然后交换
