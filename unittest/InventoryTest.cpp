@@ -139,6 +139,74 @@ void batchTransferKeepsPendingReservations()
     check(store.cancelCraft("brew-1").has_value(), "reservation remains cancelable");
 }
 
+void portionBatchSplitsBothSidesAndRestoresReceipt()
+{
+    auto store=makeStore();
+    check(store.addContainer({"buyer",{"a","b"}}).has_value(),
+          "add second trading container");
+    check(store.addContainer({"spare",{"a","b"}}).has_value(),
+          "add whole-move container");
+    const Location sellerA{Place::Container,"chest","a"};
+    const Location sellerB{Place::Container,"chest","b"};
+    const Location buyerA{Place::Container,"buyer","a"};
+    const Location buyerB{Place::Container,"buyer","b"};
+    const Location spareA{Place::Container,"spare","a"};
+    const Location spareB{Place::Container,"spare","b"};
+    check(store.createItem({"seller-stack","potion",8,sellerA}).has_value()
+          && store.createItem({"buyer-stack","potion",7,buyerA}).has_value()
+          && store.createItem({"whole","potion",1,spareA}).has_value(),
+          "create trade stacks");
+    const std::vector<PortionMove> moves{
+        {"seller-stack",sellerA,8,3,"sale-part",buyerB},
+        {"buyer-stack",buyerA,7,2,"payment-part",sellerB},
+        {"whole",spareA,1,1,"",spareB}};
+    auto invalid=moves;
+    invalid[1].destination=buyerB;
+    check(!store.transferPortionsBatch(invalid,"trade-invalid")
+          && store.findItem("seller-stack")->quantity==8
+          && !store.findItem("sale-part")
+          && !store.snapshot().completedTransfers.contains("trade-invalid"),
+          "occupied destination rejects both splits and receipt");
+    check(store.transferPortionsBatch(moves,"trade-1").has_value(),
+          "split both sides atomically");
+    check(store.findItem("seller-stack")->quantity==5
+          && store.findItem("buyer-stack")->quantity==5
+          && store.findItem("sale-part")->quantity==3
+          && store.findItem("sale-part")->location==buyerB
+          && store.findItem("payment-part")->quantity==2
+          && store.findItem("payment-part")->location==sellerB
+          && store.findItem("whole")->location==spareB,
+          "trade retains source identities and creates two outputs");
+    const std::vector<PortionMove> reversed{moves[2],moves[1],moves[0]};
+    check(store.transferPortionsBatch(reversed,"trade-1").has_value(),
+          "reordered exact retry is idempotent");
+    auto loaded=makeStore();
+    check(loaded.addContainer({"buyer",{"a","b"}}).has_value()
+          && loaded.addContainer({"spare",{"a","b"}}).has_value()
+          && loaded.restore(store.snapshot()).has_value()
+          && loaded.transferPortionsBatch(reversed,"trade-1").has_value(),
+          "receipt and portions survive snapshot restore");
+#ifdef AY_INVENTORY_JSON
+    const auto json=encodeSnapshotJson(store.snapshot());
+    check(json.has_value(),"portion snapshot encodes as JSON");
+    const auto decoded=decodeSnapshotJson(*json);
+    check(decoded.has_value() && loaded.restore(*decoded).has_value()
+          && loaded.transferPortionsBatch(moves,"trade-1").has_value(),
+          "portion receipt survives JSON restore");
+#endif
+    auto different=moves;
+    different[0].quantity=4;
+    check(!loaded.transferPortionsBatch(different,"trade-1"),
+          "request identity cannot be reused with changed quantity");
+    check(loaded.transfer("sale-part",buyerB,sellerA,"later").has_value()==false,
+          "occupied later destination remains protected");
+    check(loaded.transfer("sale-part",buyerB,
+          {Place::World,"later-drop",{}},"later").has_value(),
+          "later ownership change succeeds");
+    check(!loaded.transferPortionsBatch(moves,"trade-1"),
+          "exact retry is stale after an output moves");
+}
+
 void stacksAndOwnerDestruction()
 {
     auto store = makeStore();
@@ -513,6 +581,7 @@ int main()
         catalogAndTransfers();
         batchTransferSwapsAndRestoresReceipt();
         batchTransferKeepsPendingReservations();
+        portionBatchSplitsBothSidesAndRestoresReceipt();
         stacksAndOwnerDestruction();
         restoreAndCorruption();
         abilityBindingSurvivesSplit();

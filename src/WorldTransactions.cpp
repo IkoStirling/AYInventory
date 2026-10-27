@@ -196,6 +196,57 @@ Result<Activation> transferFocusedContainerItems(
     return result;
 }
 
+Result<Activation> transferFocusedContainerPortions(
+    Store& store, IInteractionHost& host,
+    const InteractionCandidate& focused, std::string_view actorId,
+    std::span<const PortionMove> moves, std::string requestId,
+    const ContainerPortionAuthorization& authorizeMoves,
+    const ContainerBatchSave& save)
+{
+    if (focused.kind != InteractionCandidate::Kind::OpenContainer
+        || focused.objectId.empty() || focused.subjectId.empty()
+        || actorId.empty() || !std::isfinite(focused.distance)
+        || focused.distance < 0.0 || !authorizeMoves)
+        return reject<Activation>(Error::Invalid,
+            "focused container, actor and portion authorization are required");
+    for (const auto& move : moves) {
+        if (move.expectedSource.place != Place::Container
+            || move.destination.place != Place::Container
+            || (move.expectedSource.ownerId != focused.subjectId
+                && move.destination.ownerId != focused.subjectId))
+            return reject<Activation>(Error::Invalid,
+                "each portion move must involve the focused container");
+    }
+    Store staged=store;
+    if (auto moved=staged.transferPortionsBatch(moves,requestId); !moved)
+        return std::unexpected(moved.error());
+    Activation result{focused.kind,focused.objectId,focused.subjectId};
+    if (store.snapshot().completedTransfers.contains(requestId)) return result;
+    if (auto valid=invokeHost([&] {
+            return host.validateCurrent(focused,actorId);
+        },"Container focus validation"); !valid)
+        return std::unexpected(valid.error());
+    if (auto allowed=invokeHost([&] {
+            return host.authorize(focused,actorId);
+        },"Container target authorization"); !allowed)
+        return std::unexpected(allowed.error());
+    if (auto allowed=invokeHost([&] {
+            return authorizeMoves(focused,actorId,moves);
+        },"Container portion authorization"); !allowed)
+        return std::unexpected(allowed.error());
+    if (save) {
+        if (auto saved=invokeHost([&]() -> Result<void> {
+                if (!save(staged,focused))
+                    return reject<void>(Error::Stale,
+                        "container portion save rejected candidate");
+                return {};
+            },"Container portion save"); !saved)
+            return std::unexpected(saved.error());
+    }
+    store.swap(staged);
+    return result;
+}
+
 Result<DurablePickupResult> activatePickupDurable(
     Store& store, IDurablePickupHost& host,
     const InteractionCandidate& candidate, std::string_view actorId,

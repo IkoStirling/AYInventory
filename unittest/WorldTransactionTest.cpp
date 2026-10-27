@@ -154,6 +154,76 @@ void focusedContainerBatchUsesCurrentAuthorityAndOneSave()
           "focused interaction cannot move unrelated inventory");
 }
 
+void focusedPortionsSaveBothSidesBeforePublication()
+{
+    auto made=Store::create(7,{{"wood",10}});
+    check(made.has_value(),"portion catalog");
+    auto store=std::move(*made);
+    check(store.addContainer({"bag",{"a","b"}})
+          && store.addContainer({"chest",{"a","b"}}),
+          "portion containers");
+    const Location bagA{Place::Container,"bag","a"};
+    const Location bagB{Place::Container,"bag","b"};
+    const Location chestA{Place::Container,"chest","a"};
+    const Location chestB{Place::Container,"chest","b"};
+    check(store.createItem({"bag-wood","wood",5,bagA})
+          && store.createItem({"chest-wood","wood",4,chestA}),
+          "portion sources");
+    const InteractionCandidate focused{
+        InteractionCandidate::Kind::OpenContainer,
+        "scene/chest","chest",1.0};
+    const std::vector<PortionMove> moves{
+        {"bag-wood",bagA,5,2,"bag-offer",chestB},
+        {"chest-wood",chestA,4,1,"chest-offer",bagB}};
+    InteractionHost host;
+    int checks=0,saves=0;
+    const ContainerPortionAuthorization authorize=[&](
+        const InteractionCandidate& target,std::string_view actor,
+        std::span<const PortionMove> proposed) -> Result<void> {
+        ++checks;
+        if (target!=focused || actor!="player" || proposed.size()!=2)
+            return std::unexpected(Diagnostic{Error::Denied,"bad portion rule"});
+        return {};
+    };
+    const ContainerBatchSave rejectSave=[&](
+        const Store& candidate,const InteractionCandidate&) {
+        ++saves;
+        check(candidate.findItem("bag-wood")->quantity==3
+              && candidate.findItem("chest-wood")->quantity==3
+              && candidate.findItem("bag-offer")->location==chestB
+              && candidate.findItem("chest-offer")->location==bagB
+              && store.findItem("bag-wood")->quantity==5,
+              "portion save sees complete candidate only");
+        return false;
+    };
+    check(!transferFocusedContainerPortions(store,host,focused,"player",
+            moves,"portion-exchange",authorize,rejectSave)
+          && !store.findItem("bag-offer")
+          && !store.snapshot().completedTransfers.contains("portion-exchange"),
+          "rejected save leaves both sources unchanged");
+    const ContainerBatchSave acceptSave=[&](
+        const Store&,const InteractionCandidate&) { ++saves; return true; };
+    check(transferFocusedContainerPortions(store,host,focused,"player",
+          moves,"portion-exchange",authorize,acceptSave)
+          && store.findItem("bag-wood")->quantity==3
+          && store.findItem("chest-wood")->quantity==3
+          && saves==2 && checks==2,
+          "focused portion exchange publishes after save");
+    auto loaded=Store::create(7,{{"wood",10}});
+    check(loaded.has_value() && loaded->restore(store.snapshot()),
+          "portion save restores");
+    host.current=false;
+    check(transferFocusedContainerPortions(*loaded,host,focused,"player",
+          moves,"portion-exchange",authorize,acceptSave)
+          && saves==2 && checks==2,
+          "exact retry skips stale focus and save");
+    const std::vector<PortionMove> unrelated{{"bag-wood",bagA,3,1,
+        "unrelated-output",bagB}};
+    check(!transferFocusedContainerPortions(*loaded,host,focused,"player",
+          unrelated,"unrelated",authorize),
+          "focused path cannot move unrelated bag quantity");
+}
+
 struct DurableInteractionHost final : IDurablePickupHost {
     bool worldPresent = true;
     bool consumeSucceeds = false;
@@ -823,6 +893,7 @@ int main()
         itemHoldsCompeteWithCraftsAndRestoreExactInputs();
         interactionAndPlacement();
         focusedContainerBatchUsesCurrentAuthorityAndOneSave();
+        focusedPortionsSaveBothSidesBeforePublication();
         directCraftPlacementIsOneRecoverableHandoff();
         durablePickupCommitsOwnershipBeforeBestEffortWorldCleanup();
         durablePlacementSavesCandidateOrRetractsWorld();

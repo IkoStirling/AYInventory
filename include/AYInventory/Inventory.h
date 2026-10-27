@@ -75,6 +75,20 @@ struct TransferMove {
     bool operator==(const TransferMove&) const = default;
 };
 
+/// Move a precise quantity from one existing instance. A whole move retains
+/// itemId and requires empty newItemId; a partial move creates newItemId at
+/// destination while the source keeps the remainder. expectedQuantity makes
+/// a durable exact retry distinguish an unchanged result from later edits.
+struct PortionMove {
+    std::string itemId;
+    Location expectedSource;
+    std::uint32_t expectedQuantity = 0;
+    std::uint32_t quantity = 0;
+    std::string newItemId;
+    Location destination;
+    bool operator==(const PortionMove&) const = default;
+};
+
 struct Container {
     std::string id;
     std::set<std::string> slots;
@@ -196,6 +210,13 @@ public:
     /// every item remains at its submitted destination. No World endpoints.
     Result<void> transferBatch(std::span<const TransferMove> moves,
                                std::string requestId);
+    /// Atomically move 1..256 whole or split quantities between registered
+    /// container slots. All final slots validate together; World/equipment
+    /// endpoints, prices and wallet rules remain external.
+    /// A stable receipt survives snapshot/restore. Later source or output
+    /// changes make an exact retry Stale rather than repeating a deduction.
+    Result<void> transferPortionsBatch(std::span<const PortionMove> moves,
+                                       std::string requestId);
     /// Split a stack into a new explicitly identified instance at destination.
     Result<void> split(std::string_view itemId, std::uint32_t quantity,
                        std::string newItemId, Location destination);

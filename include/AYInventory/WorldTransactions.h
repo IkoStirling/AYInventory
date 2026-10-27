@@ -88,6 +88,21 @@ Result<Activation> transferFocusedContainerItems(
     const ContainerBatchAuthorization& authorizeMoves,
     const ContainerBatchSave& save = {});
 
+using ContainerPortionAuthorization = std::function<Result<void>(
+    const InteractionCandidate&, std::string_view actorId,
+    std::span<const PortionMove>)>;
+
+/// Focused-container variant for whole or partial stack quantities. Each
+/// move must involve the current focused container; a mandatory game rule
+/// checks both parties and every quantity. The complete candidate may be
+/// saved before publication. Exact receipt retries need no focus or save.
+Result<Activation> transferFocusedContainerPortions(
+    Store& store, IInteractionHost& host,
+    const InteractionCandidate& focused, std::string_view actorId,
+    std::span<const PortionMove> moves, std::string requestId,
+    const ContainerPortionAuthorization& authorizeMoves,
+    const ContainerBatchSave& save = {});
+
 struct DurablePickupResult {
     Activation activation;
     /// Authoritative ownership and save have committed. The World projection

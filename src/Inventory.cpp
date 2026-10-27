@@ -278,6 +278,106 @@ Result<void> Store::transferBatch(std::span<const TransferMove> moves,
     return {};
 }
 
+Result<void> Store::transferPortionsBatch(
+    std::span<const PortionMove> moves, std::string requestId)
+{
+    if (requestId.empty() || moves.empty() || moves.size() > 256)
+        return reject<void>(Error::Invalid,
+            "portion batch needs a request and 1..256 moves");
+    std::map<std::string, PortionMove> ordered;
+    std::set<std::string> createdIds;
+    for (const auto& move : moves) {
+        if (move.itemId.empty() || move.expectedQuantity == 0 ||
+            move.quantity == 0 || move.quantity > move.expectedQuantity ||
+            move.expectedSource.place != Place::Container ||
+            move.destination.place != Place::Container ||
+            move.expectedSource == move.destination ||
+            (move.quantity == move.expectedQuantity &&
+             !move.newItemId.empty()) ||
+            (move.quantity < move.expectedQuantity &&
+             move.newItemId.empty()))
+            return reject<void>(Error::Invalid,
+                "portion move has invalid quantity, identity or endpoint");
+        if (!ordered.emplace(move.itemId, move).second)
+            return reject<void>(Error::Duplicate,
+                "portion batch repeats a source instance");
+        if (!move.newItemId.empty() &&
+            !createdIds.insert(move.newItemId).second)
+            return reject<void>(Error::Duplicate,
+                "portion batch repeats a new instance ID");
+    }
+    std::string fingerprint="portionBatch:";
+    appendField(fingerprint,std::to_string(ordered.size()));
+    for (const auto& [id,move]:ordered) {
+        appendField(fingerprint,transferFingerprint(id,
+            move.expectedSource,move.destination));
+        appendField(fingerprint,std::to_string(move.expectedQuantity));
+        appendField(fingerprint,std::to_string(move.quantity));
+        appendField(fingerprint,move.newItemId);
+    }
+    if (const auto receipt=_completedTransfers.find(requestId);
+        receipt!=_completedTransfers.end()) {
+        if (receipt->second!=fingerprint)
+            return reject<void>(Error::Duplicate,
+                "request ID reused for another portion batch");
+        for (const auto& [id,move]:ordered) {
+            const auto source=_items.find(id);
+            if (source==_items.end())
+                return reject<void>(Error::Stale,
+                    "portion batch source changed after receipt");
+            if (move.quantity==move.expectedQuantity) {
+                if (source->second.location!=move.destination ||
+                    source->second.quantity!=move.quantity)
+                    return reject<void>(Error::Stale,
+                        "whole portion move was superseded");
+            } else {
+                const auto part=_items.find(move.newItemId);
+                if (source->second.location!=move.expectedSource ||
+                    source->second.quantity!=
+                        move.expectedQuantity-move.quantity ||
+                    part==_items.end() ||
+                    part->second.location!=move.destination ||
+                    part->second.quantity!=move.quantity ||
+                    part->second.definitionId!=source->second.definitionId)
+                    return reject<void>(Error::Stale,
+                        "split portion move was superseded");
+            }
+        }
+        return {};
+    }
+    Store staged=*this;
+    for (const auto& [id,move]:ordered) {
+        const auto found=_items.find(id);
+        if (found==_items.end())
+            return reject<void>(Error::Missing,"portion source is missing");
+        if (found->second.location!=move.expectedSource ||
+            found->second.quantity!=move.expectedQuantity)
+            return reject<void>(Error::Stale,
+                "portion source location or quantity changed");
+        if (isReserved(id))
+            return reject<void>(Error::Occupied,
+                "portion source has reserved units");
+        if (move.quantity==move.expectedQuantity)
+            staged._items.at(id).location=move.destination;
+        else
+            staged._items.at(id).quantity-=move.quantity;
+    }
+    for (const auto& [id,move]:ordered) {
+        if (move.quantity==move.expectedQuantity) continue;
+        const auto& source=_items.at(id);
+        Item part{move.newItemId,source.definitionId,move.quantity,
+                  move.destination};
+        if (auto made=staged.createItem(std::move(part)); !made) return made;
+    }
+    staged._completedTransfers.emplace(std::move(requestId),
+                                       std::move(fingerprint));
+    Store checked=*this;
+    if (auto valid=checked.restore(staged.snapshotWithReservations()); !valid)
+        return valid;
+    swap(checked);
+    return {};
+}
+
 Result<void> Store::split(std::string_view itemId, std::uint32_t quantity,
                           std::string newItemId, Location destination)
 {
