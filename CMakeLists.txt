@@ -13,14 +13,14 @@ else()
     target_compile_options(AYInventoryCore PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
-if(TARGET AYEntityCore AND TARGET AYPhysics)
+if(TARGET AYEntityPhysicsIntegration AND TARGET AYPhysics)
     add_library(AYInventoryWorld3DHost STATIC src/ScenePhysicsHost3D.cpp)
     add_library(AYInventory::World3DHost ALIAS AYInventoryWorld3DHost)
     target_compile_features(AYInventoryWorld3DHost PUBLIC cxx_std_23)
     target_include_directories(AYInventoryWorld3DHost PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
     target_link_libraries(AYInventoryWorld3DHost PUBLIC
-        AYInventoryCore AYEntityCore AYPhysics)
+        AYInventoryCore AYEntityPhysicsIntegration AYPhysics)
     if(MSVC)
         target_compile_options(AYInventoryWorld3DHost PRIVATE /W4 /utf-8)
     endif()

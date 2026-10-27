@@ -31,12 +31,14 @@ template<class T, class E> void check(const std::expected<T, E>& value,
 struct Query final : physics::IPhysicsQuery {
     bool ready = true;
     bool rayFails = false;
+    bool ignoreUnsupported = false;
     bool overlapFails = false;
     physics::RaycastHit current{};
     std::vector<physics::BodyHandle> occupied;
     math::FVector3 boxExtents{};
     math::FQuaternion boxRotation{};
     int rayCalls = 0;
+    physics::BodyHandle lastIgnored = physics::InvalidBodyHandle;
     int overlapCalls = 0;
 
     bool isReady() const override { return ready; }
@@ -46,6 +48,17 @@ struct Query final : physics::IPhysicsQuery {
         ++rayCalls;
         out = rayFails ? physics::RaycastHit{} : current;
         return rayFails ? physics::PhysResult::BackendError : physics::PhysResult::Ok;
+    }
+    physics::PhysResult raycastSyncIgnoringBody(const math::Ray& ray,
+        physics::RaycastHit& out, physics::PhysLayerMask mask,
+        physics::BodyHandle ignored) override
+    {
+        lastIgnored = ignored;
+        if (ignoreUnsupported) {
+            out = {};
+            return physics::PhysResult::Unsupported;
+        }
+        return raycastSync(ray, out, mask);
     }
     physics::PhysResult overlapSphereSync(const math::FVector3&, float,
                                            std::vector<physics::BodyHandle>& out,
@@ -97,11 +110,13 @@ void run()
     Query query;
     query.current = {.hit = true, .body = 41, .distance = 1.0f};
     bool allowed = true;
+    physics::BodyHandle ignoredBody = 11;
     ScenePhysicsHost3D host(world, query, store,
-        [](std::string_view actor) -> Result<InteractionView3D> {
+        [&ignoredBody](std::string_view actor) -> Result<InteractionView3D> {
             if (actor != "player")
                 return std::unexpected(Diagnostic{Error::Denied, "unknown actor"});
-            return InteractionView3D{math::Ray{{0, 0, 0}, {0, 0, 1}}, 3.0};
+            return InteractionView3D{math::Ray{{0, 0, 0}, {0, 0, 1}},
+                                     3.0, 0xFFFFFFFFu, ignoredBody};
         },
         [&](const InteractionCandidate&, std::string_view) -> Result<void> {
             if (!allowed) return std::unexpected(Diagnostic{Error::Denied, "locked"});
@@ -110,6 +125,10 @@ void run()
     auto focus = host.focus("player");
     check(focus && *focus && (*focus)->objectId == dropId
           && (*focus)->subjectId == "wood-1", "ray resolved stable pickup");
+    check(query.lastIgnored == ignoredBody, "actor body excluded from focus");
+    query.ignoreUnsupported = true;
+    check(!host.focus("player"), "unsupported self-ignore fails explicitly");
+    query.ignoreUnsupported = false;
     query.current.body = 99;
     check(!activate(store, host, **focus, "player",
                     Location{Place::Container, "bag", "slot"}, "pickup-1"),

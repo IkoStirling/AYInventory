@@ -16,6 +16,7 @@ struct InteractionView3D {
     math::Ray ray;
     double reach = 0.0;
     physics::PhysLayerMask layerMask = 0xFFFFFFFFu;
+    physics::BodyHandle ignoredBody = physics::InvalidBodyHandle;
 };
 
 /// Concrete single-World adapter for ordinary 3D Entity/Physics scenes.
@@ -32,8 +33,10 @@ public:
     ScenePhysicsHost3D(entity::World& world, physics::IPhysicsQuery& query,
                        Store& store, ViewProvider view, Permission permission);
 
-    /// One current raycast. An opaque Physics body is resolved against live
-    /// 3D RigidBodyComponents and then to an Entity persistent ID.
+    /// One current generic 3D interaction focus. An opaque Physics body is
+    /// resolved against live 3D RigidBodyComponents and then to an Entity
+    /// persistent ID. ignoredBody excludes the actor's own collider when the
+    /// query backend supports that operation.
     Result<std::optional<InteractionCandidate>> focus(std::string_view actorId);
 
     Result<void> validateCurrent(const InteractionCandidate& candidate,

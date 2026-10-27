@@ -1,6 +1,7 @@
 #include <AYInventory/ScenePhysicsHost3D.h>
 
 #include <AYEntity.h>
+#include <AYEntity/WorldInteraction3D.h>
 #include <AYEntity/components/ColliderComponent.h>
 #include <AYEntity/components/RigidBodyComponent.h>
 
@@ -74,30 +75,53 @@ Result<std::optional<InteractionCandidate>> ScenePhysicsHost3D::focus(
     if (!view) return std::unexpected(view.error());
     if (!std::isfinite(view->reach) || view->reach <= 0.0 || view->reach > 10000.0)
         return fail<std::optional<InteractionCandidate>>(Error::Invalid, "invalid reach");
-    physics::RaycastHit hit{};
-    if (_query.raycastSync(view->ray, hit, view->layerMask) != physics::PhysResult::Ok)
-        return fail<std::optional<InteractionCandidate>>(Error::Stale, "ray query failed");
-    if (!hit.hit || hit.body == physics::InvalidBodyHandle
-        || !std::isfinite(hit.distance) || hit.distance < 0.0f
-        || hit.distance > view->reach) return std::optional<InteractionCandidate>{};
-
-    entity::Entity* matched = nullptr;
-    for (auto* entity : _world.getAllEntities()) {
-        if (!entity || !entity->isSpatial()) continue;
-        auto* body = entity->getComponent<entity::RigidBodyComponent>();
-        if (!body || body->getPhysicsDimension()
-                != entity::RigidBodyComponent::PhysicsDimension::ThreeD
-            || body->getBodyHandle() != hit.body) continue;
-        if (matched) return fail<std::optional<InteractionCandidate>>(
+    bool ambiguousBody = false;
+    entity::WorldInteraction3D interaction(_world, _query,
+        [current = *view](std::string_view)
+            -> std::optional<entity::WorldInteractionView3D> {
+            return entity::WorldInteractionView3D{
+                current.ray, current.reach, current.layerMask,
+                current.ignoredBody};
+        },
+        [this, &ambiguousBody](physics::BodyHandle handle) -> entity::Entity* {
+            entity::Entity* matched = nullptr;
+            for (auto* candidate : _world.getAllEntities()) {
+                if (!candidate || !candidate->isSpatial()) continue;
+                auto* body = candidate->getComponent<entity::RigidBodyComponent>();
+                if (!body || body->getPhysicsDimension()
+                        != entity::RigidBodyComponent::PhysicsDimension::ThreeD
+                    || body->getBodyHandle() != handle) continue;
+                if (matched) {
+                    ambiguousBody = true;
+                    return nullptr;
+                }
+                matched = candidate;
+            }
+            return matched;
+        },
+        [this](const entity::Entity& target, std::string_view) {
+            const auto& id = target.persistentId();
+            if (!validEntityId(id)) return std::vector<std::uint32_t>{};
+            if (_store.occupying({Place::World, id, {}}))
+                return std::vector<std::uint32_t>{1};
+            if (_store.hasContainer(id)) return std::vector<std::uint32_t>{2};
+            return std::vector<std::uint32_t>{};
+        }, {}, {});
+    const auto focused = interaction.focus(actorId);
+    if (ambiguousBody)
+        return fail<std::optional<InteractionCandidate>>(
             Error::Stale, "body maps to multiple entities");
-        matched = entity;
-    }
-    if (!matched || !validEntityId(matched->persistentId()))
-        return std::optional<InteractionCandidate>{};
-    const auto& id = matched->persistentId();
+    if (focused.status == entity::WorldInteractionStatus3D::Invalid)
+        return fail<std::optional<InteractionCandidate>>(
+            Error::Invalid, "invalid 3D interaction view or offers");
+    if (focused.status != entity::WorldInteractionStatus3D::Ok)
+        return fail<std::optional<InteractionCandidate>>(
+            Error::Stale, "3D interaction query failed");
+    if (!focused.focus) return std::optional<InteractionCandidate>{};
+    const auto& id = focused.focus->objectId;
     InteractionCandidate candidate;
     candidate.objectId = id;
-    candidate.distance = hit.distance;
+    candidate.distance = focused.focus->distance;
     if (auto item = _store.occupying({Place::World, id, {}})) {
         candidate.kind = InteractionCandidate::Kind::Pickup;
         candidate.subjectId = *item;

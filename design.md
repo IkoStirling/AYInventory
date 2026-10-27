@@ -110,8 +110,10 @@ AYAbility 的设备实例并非物品所有权。装备 profile 暴露配置 ID 
   槽重建 World 和 Store。该路径不自动保存整个 Scene。拾取的立即落盘使用
   上述保存优先路径；游戏必须把墓碑与候选 Store 同槽提交。
 - `ScenePhysicsHost3D` 接受当前 Scene 的 `World&`、`IPhysicsQuery&`、`Store&`，
-  以及游戏拥有的当前视线和权限回调。焦点和激活各自发起当前 raycast，按有效 3D
-  刚体句柄解析 Entity，再用 `persistentId` 对应 Store 的世界物品或容器。
+  以及游戏拥有的当前视线和权限回调。焦点和激活各自调用通用
+  `WorldInteraction3D`，按有效 3D 刚体句柄解析 Entity，再用 `persistentId`
+  对应 Store 的世界物品或容器。视线可携带要排除的角色刚体；若物理后端不支持
+  该排除查询，焦点明确失败。重复刚体归属仍作为过期状态拒绝。
   拾取仅删除没有子实体的当前 Entity；任何失败都不让 Store 发布预提交转移。
 - 可选 `WorldItemCommit` 将单件拾取或放置的 Store 候选、WorldStateLedger
   墓碑/活记录、指纹收据和可选游戏节封装为同一 SaveParticipantBundle，写一个

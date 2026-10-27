@@ -92,6 +92,9 @@ schema v8：记录制作和普通预留的请求与精确材料实例。`restore
 不会消耗材料。完成收据和世界物品 ID 同时持久化，重复调用只核验已发布对象。
 
 `WorldTransactions.h` 接收 Host 从 3D 射线/空间查询映射出的稳定对象 ID。
+可选 `ScenePhysicsHost3D` 的焦点查询复用 `WorldInteraction3D`，共享当前射线、
+刚体到 Entity 和稳定对象身份核验。`InteractionView3D::ignoredBody` 可指定角色自身
+刚体；后端不支持排除时明确失败，不会退回到可能击中自身的普通射线。
 `chooseFocus` 选最近候选，`activate` 在操作当下重验有效性与权限，完成拾取或返回可打开的容器 ID。
 在已聚焦容器与玩家背包之间搬运多件完整实例时，可用 `transferFocusedContainerItems`：
 它先暂存 `transferBatch`，再重验当前焦点、目标权限和游戏提供的逐项归属授权；
